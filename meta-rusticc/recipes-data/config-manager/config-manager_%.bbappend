@@ -4,6 +4,9 @@
 # image file name stays COSMOS's cosmos-<machine>.swu
 do_install:append() {
     sed -i -e 's#OpenCentauri/cosmos#Rusti3D/rusticc#g' ${D}${bindir}/build-klipper-var-config
+    # the web UI's update panel lists the entry by its section name
+    # (Moonruster's swupdate updater takes any name; its stored state is per name)
+    sed -i -e 's/\[update_manager cosmos\]/[update_manager rusticc]/' ${D}${bindir}/build-klipper-var-config
 }
 
 # The settings file keeps its name (cosmos.conf: tools and the user's edits
