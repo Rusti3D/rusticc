@@ -23,8 +23,8 @@ STAGE=~/rk/cc1_stage
 cp "$HERE"/dicts/*.dict /ci_build/dict/
 installed=()
 for f in "$ADDONS"/afc_extras/*.py; do cp "$f" $REF/klippy/extras/; installed+=("$REF/klippy/extras/$(basename "$f")"); done
-# (ACE_SRC: a cosmoace_afc checkout the native ACE follows, instead of the printer's copy)
-cp -r "${ACE_SRC:-$PLUGINS/AFC_ACE}" $REF/klippy/plugins/AFC_ACE; installed+=("$REF/klippy/plugins/AFC_ACE")
+# (the AFC_ACE unit Rust-AFC's native ACE follows: its tests/reference, or ACE_SRC)
+cp -r "${ACE_SRC:-$(realpath "$HERE/../Rust-AFC/tests/reference/AFC_ACE")}" $REF/klippy/plugins/AFC_ACE; installed+=("$REF/klippy/plugins/AFC_ACE")
 fake=
 trap 'rm -rf "${installed[@]}"; [ -n "$fake" ] && kill $fake' EXIT
 stage() {
