@@ -19,6 +19,14 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
   - User (2026-10-25): other MMUs use the regular (python) AFC distro for now; the full native AFC port
     comes once Rusticc checks out on the printer.
 - [ ] Release 0.0.1: the new .swu (rusticc binary, Moonruster 724e081 + patches) on GitHub (user's request).
+- [ ] Later (user, 2026-10-25): Rusticc's own installer, "not just reuse cosmos. We cant assume everyone is
+  coming from cosmos, this will branch eventually." Today the .swu is a repack of a COSMOS slot, signed with
+  COSMOS's swupdate key and installed with COSMOS's `flash`: it needs a COSMOS printer. To plan: install paths
+  from stock Elegoo firmware and from other distros, Rusticc's own signing key, a Yocto build (no repack).
+  First decide the build system on numbers (user: "being able to build quickly is a huge plus for
+  development"): time a cold build and a one-change rebuild of meta-rusticc with Yocto, and of a minimal
+  Buildroot prototype for the CC1 (kernel, rootfs, rusticc, Moonruster); weigh that against the COSMOS
+  recipes Buildroot would need re-done (kernel config, DSP firmware, A/B swupdate, screen, web UIs).
 
 ## How the code is organised
 
