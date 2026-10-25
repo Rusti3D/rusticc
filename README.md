@@ -4,11 +4,13 @@
 
 Rusticc is [COSMOS](https://github.com/OpenCentauri/cosmos) (OpenCentauri's firmware for the Elegoo Centauri Carbon
 family) in Rust: the same distribution, with its Kalico replaced by [kaliru](https://github.com/Rusti3D/kaliru)
-(Kalico ported to Rust) and its MCU firmware by kaliru's Rust firmware. The first goal is parity with COSMOS: same
+(Kalico ported to Rust), its Moonraker by [Moonruster](https://github.com/Rusti3D/moonruster) (Moonraker ported to
+Rust), and its MCU firmware by kaliru's Rust firmware. The first goal is parity with COSMOS: same
 behaviour, less CPU and memory.
 
-COSMOS builds Kalico with its own patch set; Rusticc builds kaliru with its own the same way. kaliru stays a plain
-port of Kalico, and everything Rusticc-specific lives here.
+COSMOS builds Kalico and Moonraker with its own patch sets; Rusticc builds kaliru and Moonruster with its own the
+same way. kaliru and Moonruster stay plain ports of their originals, and everything Rusticc-specific lives here.
+(The Moonruster recipe, `meta-rusticc/recipes-apps/moonruster`, is in progress.)
 
 ## Layout
 
