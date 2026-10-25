@@ -12,17 +12,11 @@ MOONRAKER_EXEC="/usr/bin/moonruster"
 MOONRAKER_ARGS="-d /etc/klipper -l /board-resource/moonruster.log -u /run/moonraker.sock"
 PIDFILE="/var/run/moonraker.pid"
 ASVC_OVERLAY="/data/overlay-etc/upper/klipper/moonraker.asvc"
-ASVC_DEFAULT="/usr/share/moonraker/moonraker/assets/default_allowed_services"
+ASVC_DEFAULT="/usr/share/moonruster/default_allowed_services"
 
 export TMPDIR="/user-resource/.tmp"
-# Rusticc: Moonruster in place of python3 -m moonraker. Its python
-# components load from COSMOS's Moonraker tree on the image's CPython, with
-# COSMOS's interpreter options (-X lazy_imports=all -X no_debug_ranges);
-# logs rotate at 5 MB as on COSMOS's Moonraker
-export MOONRUSTER_MOONRAKER_DIR="/usr/share/moonraker"
-export MOONRUSTER_PYTHON="/usr/bin/python3"
-export PYTHON_LAZY_IMPORTS=all
-export PYTHONNODEBUGRANGES=1
+# Rusticc: Moonruster in place of python3 -m moonraker (the image has no
+# Moonraker); logs rotate at 5 MB as on COSMOS's Moonraker
 export MOONRUSTER_LOG_MAX_BYTES=5242880
 
 case "$1" in

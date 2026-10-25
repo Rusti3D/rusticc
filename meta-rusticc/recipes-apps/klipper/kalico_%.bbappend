@@ -23,3 +23,8 @@ SRC_URI += "file://timelapse.cfg"
 do_install:append() {
     install -m 0644 ${UNPACKDIR}/timelapse.cfg ${D}${sysconfdir}/klipper/config/klipper-readonly/
 }
+
+# klippy's python packages that kaliru replaces and no python plugin imports
+# (its greenlets, msgspec and CAN tooling are Rust). Kept for python plugins:
+# python3, numpy, pyserial, jinja2 + markupsafe, cffi + pycparser.
+RDEPENDS:${PN}:remove = "python3-greenlet python3-msgspec python3-can"
