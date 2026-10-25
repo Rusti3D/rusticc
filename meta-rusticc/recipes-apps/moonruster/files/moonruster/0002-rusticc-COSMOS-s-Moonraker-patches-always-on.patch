@@ -11,12 +11,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 4 insertions(+), 39 deletions(-)
 
 diff --git a/src/utils.rs b/src/utils.rs
-index 77f6a6b..c20e855 100644
+index 90f4d05..f0fbbff 100644
 --- a/src/utils.rs
 +++ b/src/utils.rs
-@@ -149,46 +149,11 @@ pub fn float_value(f: f64) -> Value {
-     serde_json::Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null)
- }
+@@ -147,46 +147,11 @@ pub fn monotonic() -> f64 {
+ /// they cannot be encoded
+ pub use crate::pycompat::pyfmt::float_value;
  
 -/// Whether this is a COSMOS printer (OpenCentauri: /etc/os-release ID=cosmos),
 -/// or a system derived from it that says so the os-release way (ID_LIKE

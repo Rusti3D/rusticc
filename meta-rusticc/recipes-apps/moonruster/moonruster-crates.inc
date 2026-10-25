@@ -10,7 +10,6 @@ SRC_URI += " \
     crate://crates.io/asn1-rs-derive/0.4.0 \
     crate://crates.io/asn1-rs-impl/0.1.0 \
     crate://crates.io/async-broadcast/0.7.2 \
-    crate://crates.io/async-compression/0.4.51 \
     crate://crates.io/async-recursion/1.2.0 \
     crate://crates.io/async-trait/0.1.92 \
     crate://crates.io/atomic-waker/1.1.2 \
@@ -33,8 +32,6 @@ SRC_URI += " \
     crate://crates.io/cfg_aliases/0.2.2 \
     crate://crates.io/chacha20/0.10.2 \
     crate://crates.io/chrono/0.4.45 \
-    crate://crates.io/compression-codecs/0.4.46 \
-    crate://crates.io/compression-core/0.4.34 \
     crate://crates.io/const-oid/0.9.6 \
     crate://crates.io/core-foundation/0.10.1 \
     crate://crates.io/core-foundation/0.9.4 \
@@ -355,7 +352,6 @@ SRC_URI[asn1-rs-0.5.2.sha256sum] = "7f6fd5ddaf0351dff5b8da21b2fb4ff8e08ddd02857f
 SRC_URI[asn1-rs-derive-0.4.0.sha256sum] = "726535892e8eae7e70657b4c8ea93d26b8553afb1ce617caee529ef96d7dee6c"
 SRC_URI[asn1-rs-impl-0.1.0.sha256sum] = "2777730b2039ac0f95f093556e61b6d26cebed5393ca6f152717777cec3a42ed"
 SRC_URI[async-broadcast-0.7.2.sha256sum] = "435a87a52755b8f27fcf321ac4f04b2802e337c8c4872923137471ec39c37532"
-SRC_URI[async-compression-0.4.51.sha256sum] = "9d5755640120b24961f8231e05892e4a4f7e0d04e8aeca161508c9c397946970"
 SRC_URI[async-recursion-1.2.0.sha256sum] = "4f8abc12baad266b1c8cec146854c195b5864b4221d4b2ca7296a7ae82d9e451"
 SRC_URI[async-trait-0.1.92.sha256sum] = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 SRC_URI[atomic-waker-1.1.2.sha256sum] = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
@@ -378,8 +374,6 @@ SRC_URI[cfg-if-1.0.5.sha256sum] = "4e7648175b45a9a48536d676f68d918270699102aa8da
 SRC_URI[cfg_aliases-0.2.2.sha256sum] = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 SRC_URI[chacha20-0.10.2.sha256sum] = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 SRC_URI[chrono-0.4.45.sha256sum] = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
-SRC_URI[compression-codecs-0.4.46.sha256sum] = "cae36683101b2899f48bd31f8db9839437356188e3b1ff23096e73dab09ba8fe"
-SRC_URI[compression-core-0.4.34.sha256sum] = "2ebdda89edc534bf8d5dd2857562633b6495557e5846552ade994b99ed13c36a"
 SRC_URI[const-oid-0.9.6.sha256sum] = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 SRC_URI[core-foundation-0.10.1.sha256sum] = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
 SRC_URI[core-foundation-0.9.4.sha256sum] = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"

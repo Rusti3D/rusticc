@@ -12,15 +12,15 @@ releases.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/components/update_manager/mod.rs         |   8 +-
- src/components/update_manager/self_deploy.rs | 233 -------------------
- 2 files changed, 4 insertions(+), 237 deletions(-)
+ src/components/update_manager/self_deploy.rs | 255 -------------------
+ 2 files changed, 4 insertions(+), 259 deletions(-)
  delete mode 100644 src/components/update_manager/self_deploy.rs
 
 diff --git a/src/components/update_manager/mod.rs b/src/components/update_manager/mod.rs
-index eacf8b2..9a4e98f 100644
+index a5a7a5c..73b64a3 100644
 --- a/src/components/update_manager/mod.rs
 +++ b/src/components/update_manager/mod.rs
-@@ -6,7 +6,6 @@ pub mod git_deploy;
+@@ -8,7 +8,6 @@ pub mod git_deploy;
  pub mod net_deploy;
  mod pk_enums;
  pub mod python_deploy;
@@ -28,7 +28,7 @@ index eacf8b2..9a4e98f 100644
  pub mod swu_deploy;
  pub mod system_deploy;
  
-@@ -993,8 +992,9 @@ fn get_base_configuration(config: &ConfigHelper) -> Result<ConfigHelper, ConfigE
+@@ -286,8 +285,9 @@ fn get_base_configuration(config: &ConfigHelper) -> Result<ConfigHelper, ConfigE
      m.insert("pip_environment_variables".into(), "SKIP_CYTHON=Y".into());
      m.insert("path".into(), String::new());
      m.insert("managed_services".into(), "moonraker".into());
@@ -40,7 +40,7 @@ index eacf8b2..9a4e98f 100644
      base.insert("moonraker".into(), m);
      let mut k = IndexMap::new();
      k.insert("moved_origin".into(), "https://github.com/kevinoconnor/klipper.git".into());
-@@ -1212,7 +1212,7 @@ impl UpdateManager {
+@@ -512,7 +512,7 @@ impl UpdateManager {
          }
          let mcfg = app_config.getsection("moonraker");
          let kcfg = app_config.getsection("klipper");
@@ -51,10 +51,10 @@ index eacf8b2..9a4e98f 100644
              kdeploy = get_deploy(&kcfg.get("type")?, &kcfg, &cmd_helper)?;
 diff --git a/src/components/update_manager/self_deploy.rs b/src/components/update_manager/self_deploy.rs
 deleted file mode 100644
-index 5018946..0000000
+index d325e57..0000000
 --- a/src/components/update_manager/self_deploy.rs
 +++ /dev/null
-@@ -1,233 +0,0 @@
+@@ -1,255 +0,0 @@
 -// Moonruster self update: the built-in `moonraker` entry.  Moonraker updates
 -// itself from git; Moonruster is a single binary, so it replaces itself with
 -// the release asset for its architecture and restarts the service.
@@ -166,7 +166,18 @@ index 5018946..0000000
 -        if crate::utils::access_write(dir) {
 -            let tmp = dir.join(".moonruster.update");
 -            ch.http()
--                .download_file(&dl.0, &dl.1, Some(tmp.clone()), dl.2, Some(ch.on_download_progress()), DOWNLOAD_TIMEOUT, 3, 1.0)
+-                .download_file(
+-                    &dl.0,
+-                    &dl.1,
+-                    crate::components::http_client::DownloadOpts {
+-                        destination: Some(tmp.clone()),
+-                        download_size: dl.2,
+-                        progress: Some(ch.on_download_progress()),
+-                        request_timeout: DOWNLOAD_TIMEOUT,
+-                        attempts: 3,
+-                        ..Default::default()
+-                    },
+-                )
 -                .await?;
 -            use std::os::unix::fs::PermissionsExt;
 -            let res = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).and_then(|_| std::fs::rename(&tmp, exe));
@@ -179,9 +190,20 @@ index 5018946..0000000
 -        let tmp = tempdir.join("moonruster");
 -        let res: Result<(), ServerError> = async {
 -            ch.http()
--                .download_file(&dl.0, &dl.1, Some(tmp.clone()), dl.2, Some(ch.on_download_progress()), DOWNLOAD_TIMEOUT, 3, 1.0)
+-                .download_file(
+-                    &dl.0,
+-                    &dl.1,
+-                    crate::components::http_client::DownloadOpts {
+-                        destination: Some(tmp.clone()),
+-                        download_size: dl.2,
+-                        progress: Some(ch.on_download_progress()),
+-                        request_timeout: DOWNLOAD_TIMEOUT,
+-                        attempts: 3,
+-                        ..Default::default()
+-                    },
+-                )
 -                .await?;
--            let machine: Rc<Machine> = server().lookup_component("machine").ok_or_else(|| ServerError::new("machine", 500))?;
+-            let machine = server().get::<Machine>().ok_or_else(|| ServerError::new("machine", 500))?;
 -            machine.exec_sudo_command(&format!("install -m 755 {} {}", tmp.display(), exe.display()), 1, 30.0).await?;
 -            Ok(())
 -        }
