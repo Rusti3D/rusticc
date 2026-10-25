@@ -1,0 +1,907 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 13:19:35 +0200
+Subject: [PATCH 15/20] rusticc: drv8833 host module (COSMOS
+ 0003-drv8833-motor-control)
+
+[drv8833 NAME]: CANVAS lane motors with the MCU's hall-sensor PID; the commands
+MOVE_DEBUG, DRV_SET_SPEED, DRV_MOVE, DRV(8833)_PID_TUNE, (SET_)DRV(8833)_PID,
+the status, python's rounding and messages.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
+---
+ src/extras/drv8833.rs | 862 ++++++++++++++++++++++++++++++++++++++++++
+ src/extras/mod.rs     |   3 +
+ 2 files changed, 865 insertions(+)
+ create mode 100644 src/extras/drv8833.rs
+
+diff --git a/src/extras/drv8833.rs b/src/extras/drv8833.rs
+new file mode 100644
+index 0000000..34e8d1a
+--- /dev/null
++++ b/src/extras/drv8833.rs
+@@ -0,0 +1,862 @@
++// Support for DRV8833 based CANVAS-style motor control (port of COSMOS's
++// klippy/extras/drv8833.py, 0003-drv8833-motor-control)
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use crate::configfile::{ConfigWrapper, Dflt, Lim};
++use crate::error::{KError, KResult};
++use crate::extras::bus::pin_mcu;
++use crate::gcode::{GCodeCommand, GCodeDispatch};
++use crate::mcu::{pint, CommandWrapper, Mcu};
++use crate::msgproto::{Params, Val};
++use crate::pins::PinsObject;
++use crate::printer::{downcast_rc, ConfigFileObject, PObj, Printer, PrinterObject};
++use crate::pyfmt::{py_max, py_min};
++use crate::pyval::PyVal;
++use crate::reactor::{Reactor, NOW};
++use std::cell::{Cell, RefCell};
++use std::rc::Rc;
++
++const HALL_POLL_TIME: f64 = 0.001;
++const CONTROL_INTERVAL: f64 = 0.010;
++const MCU_REPORT_INTERVAL: f64 = 0.050;
++const DEBUG_LOG_INTERVAL: f64 = 0.500;
++const DEFAULT_DUTY: f64 = 50.0;
++const MAX_DUTY_STEP: f64 = 4.0;
++const DEFAULT_PID_KP: f64 = 1.2;
++const DEFAULT_PID_KI: f64 = 0.8;
++const DEFAULT_PID_KD: f64 = 0.02;
++const HALL_RESOLUTION_SCALE: f64 = 1000000.0;
++const SPEED_SCALE: f64 = 1000.0;
++const DUTY_SCALE: f64 = 10.0;
++const PID_PARAM_SCALE: f64 = 1000.0;
++const AUTOTUNE_SETTLE_TIME: f64 = 0.8;
++const AUTOTUNE_SAMPLE_TIME: f64 = 0.4;
++const AUTOTUNE_BAND_RATIO: f64 = 0.05;
++const AUTOTUNE_MIN_BAND: f64 = 1.0;
++const AUTOTUNE_RELAY_RATIO: f64 = 0.15;
++const AUTOTUNE_MIN_RELAY_DUTY: f64 = 4.0;
++const AUTOTUNE_MAX_RELAY_DUTY: f64 = 20.0;
++const AUTOTUNE_BASELINE_STEPS: usize = 6;
++const AUTOTUNE_REQUIRED_PAIRS: usize = 3;
++const AUTOTUNE_TIMEOUT: f64 = 45.0;
++
++fn clamp(value: f64, min_value: f64, max_value: f64) -> f64 {
++    py_max(min_value, py_min(max_value, value))
++}
++
++/// python's int(round(x))
++fn iround(x: f64) -> i64 {
++    x.round_ties_even() as i64
++}
++
++fn not_configured() -> KError {
++    KError::command("drv8833 controller not configured")
++}
++
++pub struct McuDrv8833Controller {
++    reactor: Rc<Reactor>,
++    mcu: Rc<Mcu>,
++    oid: i64,
++    motor_fwd_pin: String,
++    motor_rwd_pin: String,
++    hall_pin: String,
++    hall_pullup: i64,
++    cycle_time: f64,
++    pub hall_resolution: f64,
++    pub default_duty: f64,
++    max_duty_step: f64,
++    pub pid_kp: Cell<f64>,
++    pub pid_ki: Cell<f64>,
++    pub pid_kd: Cell<f64>,
++    pub last_active: Cell<bool>,
++    pub last_manual: Cell<bool>,
++    pub last_count: Cell<i64>,
++    pub last_speed_mm_s: Cell<f64>,
++    pub last_duty_cycle: Cell<f64>,
++    pub last_status_time: Cell<f64>,
++    pub status_sequence: Cell<i64>,
++    status_callback: RefCell<Option<Rc<dyn Fn()>>>,
++    set_cmd: RefCell<Option<CommandWrapper>>,
++    manual_cmd: RefCell<Option<CommandWrapper>>,
++    set_pid_cmd: RefCell<Option<CommandWrapper>>,
++}
++
++impl McuDrv8833Controller {
++    fn new(
++        config: &ConfigWrapper,
++        mcu: &Rc<Mcu>,
++        motor_fwd_pin: String,
++        motor_rwd_pin: String,
++        hall_pin: String,
++        hall_pullup: i64,
++    ) -> KResult<Rc<Self>> {
++        let printer = config.get_printer();
++        let oid = mcu.create_oid();
++        let c = Rc::new(McuDrv8833Controller {
++            reactor: printer.get_reactor(),
++            mcu: mcu.clone(),
++            oid,
++            motor_fwd_pin,
++            motor_rwd_pin,
++            hall_pin,
++            hall_pullup,
++            cycle_time: config.getfloat("motor_cycle_time", 0.002, Lim::new().above(0.0))?,
++            hall_resolution: config.getfloat("motor_hall_resolution", Dflt::Required, Lim::new().above(0.0))?,
++            default_duty: config.getfloat("default_duty", DEFAULT_DUTY, Lim::new().min(0.0).max(100.0))?,
++            max_duty_step: config.getfloat("max_duty_step", MAX_DUTY_STEP, Lim::new().above(0.0).max(100.0))?,
++            pid_kp: Cell::new(config.getfloat("pid_kp", DEFAULT_PID_KP, Lim::new().min(0.0))?),
++            pid_ki: Cell::new(config.getfloat("pid_ki", DEFAULT_PID_KI, Lim::new().min(0.0))?),
++            pid_kd: Cell::new(config.getfloat("pid_kd", DEFAULT_PID_KD, Lim::new().min(0.0))?),
++            last_active: Cell::new(false),
++            last_manual: Cell::new(false),
++            last_count: Cell::new(0),
++            last_speed_mm_s: Cell::new(0.0),
++            last_duty_cycle: Cell::new(0.0),
++            last_status_time: Cell::new(0.0),
++            status_sequence: Cell::new(0),
++            status_callback: RefCell::new(None),
++            set_cmd: RefCell::new(None),
++            manual_cmd: RefCell::new(None),
++            set_pid_cmd: RefCell::new(None),
++        });
++        let w = Rc::downgrade(&c);
++        mcu.register_response(
++            Some(Rc::new(move |p: &Params| {
++                if let Some(c) = w.upgrade() {
++                    c.handle_status(p);
++                }
++                Ok(())
++            })),
++            "drv8833_status",
++            Some(oid),
++        );
++        let w = Rc::downgrade(&c);
++        mcu.register_config_callback(Rc::new(move || match w.upgrade() {
++            Some(c) => c.build_config(),
++            None => Ok(()),
++        }));
++        Ok(c)
++    }
++
++    fn pid_to_mcu(value: f64) -> i64 {
++        iround(value * PID_PARAM_SCALE * DUTY_SCALE)
++    }
++
++    fn build_config(&self) -> KResult<()> {
++        let mcu = &self.mcu;
++        let pwm_max = (mcu.get_constant_float("PWM_MAX")? + 0.5) as i64;
++        let cycle_ticks = mcu.seconds_to_clock(self.cycle_time);
++        let poll_ticks = mcu.seconds_to_clock(HALL_POLL_TIME);
++        let control_ticks = mcu.seconds_to_clock(CONTROL_INTERVAL);
++        let report_ticks = mcu.seconds_to_clock(MCU_REPORT_INTERVAL);
++        let hall_resolution = iround(self.hall_resolution * HALL_RESOLUTION_SCALE);
++        let default_duty = iround(self.default_duty * DUTY_SCALE);
++        let max_duty_step = iround(self.max_duty_step * DUTY_SCALE);
++        let pid_kp = Self::pid_to_mcu(self.pid_kp.get());
++        let pid_ki = Self::pid_to_mcu(self.pid_ki.get());
++        let pid_kd = Self::pid_to_mcu(self.pid_kd.get());
++        mcu.add_config_cmd(
++            &format!(
++                "config_drv8833 oid={} motor_fwd_pin={} motor_rwd_pin={} cycle_ticks={} hall_pin={} hall_pullup={} \
++                 poll_ticks={} control_ticks={} report_ticks={} hall_resolution={} pwm_max={} default_duty={} \
++                 max_duty_step={}",
++                self.oid,
++                self.motor_fwd_pin,
++                self.motor_rwd_pin,
++                cycle_ticks,
++                self.hall_pin,
++                self.hall_pullup,
++                poll_ticks,
++                control_ticks,
++                report_ticks,
++                hall_resolution,
++                pwm_max,
++                default_duty,
++                max_duty_step
++            ),
++            false,
++            false,
++        );
++        mcu.add_config_cmd(&format!("drv8833_set_pid oid={} kp={} ki={} kd={}", self.oid, pid_kp, pid_ki, pid_kd), true, false);
++        mcu.add_config_cmd(&format!("drv8833_set oid={} enable=0 direction=1 target_speed=0 stop_ticks=0", self.oid), false, true);
++        *self.set_cmd.borrow_mut() =
++            Some(mcu.lookup_command("drv8833_set oid=%c enable=%c direction=%c target_speed=%u stop_ticks=%u", None)?);
++        *self.manual_cmd.borrow_mut() = Some(mcu.lookup_command("drv8833_manual oid=%c enable=%c direction=%c duty=%hu", None)?);
++        *self.set_pid_cmd.borrow_mut() = Some(mcu.lookup_command("drv8833_set_pid oid=%c kp=%u ki=%u kd=%u", None)?);
++        Ok(())
++    }
++
++    fn handle_status(&self, params: &Params) {
++        self.last_active.set(pint(params, "active") != 0);
++        self.last_manual.set(pint(params, "manual") != 0);
++        self.last_count.set(pint(params, "count"));
++        self.last_speed_mm_s.set(pint(params, "speed") as f64 / SPEED_SCALE);
++        self.last_duty_cycle.set(pint(params, "duty") as f64 / DUTY_SCALE);
++        self.last_status_time.set(self.reactor.monotonic());
++        self.status_sequence.set(self.status_sequence.get() + 1);
++        let cb = self.status_callback.borrow().clone();
++        if let Some(cb) = cb {
++            cb();
++        }
++    }
++
++    fn send(cmd: &RefCell<Option<CommandWrapper>>, data: &[i64]) -> KResult<()> {
++        let data: Vec<Val> = data.iter().map(|v| Val::Int(*v)).collect();
++        cmd.borrow().as_ref().ok_or_else(not_configured)?.send(&data, 0, 0)
++    }
++
++    pub fn start_move(&self, direction: i64, target_speed: f64, stop_ticks: i64) -> KResult<()> {
++        let dir = if direction > 0 { 1 } else { 0 };
++        Self::send(&self.set_cmd, &[self.oid, 1, dir, iround(target_speed * SPEED_SCALE), stop_ticks])
++    }
++
++    pub fn manual_start(&self, direction: i64, duty_cycle: f64) -> KResult<()> {
++        let dir = if direction > 0 { 1 } else { 0 };
++        Self::send(&self.manual_cmd, &[self.oid, 1, dir, iround(clamp(duty_cycle, 0.0, 100.0) * DUTY_SCALE)])
++    }
++
++    pub fn set_pid(&self, kp: f64, ki: f64, kd: f64) -> KResult<()> {
++        if self.set_pid_cmd.borrow().is_none() {
++            return Err(not_configured());
++        }
++        self.pid_kp.set(kp);
++        self.pid_ki.set(ki);
++        self.pid_kd.set(kd);
++        Self::send(&self.set_pid_cmd, &[self.oid, Self::pid_to_mcu(kp), Self::pid_to_mcu(ki), Self::pid_to_mcu(kd)])
++    }
++
++    pub fn stop(&self) -> KResult<()> {
++        Self::send(&self.set_cmd, &[self.oid, 0, 1, 0, 0])
++    }
++}
++
++/// a peak of the relay response: (time, speed, "high" / "low")
++type Peak = (f64, f64, &'static str);
++
++struct Drv8833PidAutoTune<'a> {
++    lane: &'a PrinterDrv8833,
++    gcmd: &'a GCodeCommand,
++    controller: Rc<McuDrv8833Controller>,
++    target_speed: f64,
++    direction: i64,
++    band: f64,
++    settle_time: f64,
++    sample_time: f64,
++    timeout: f64,
++    write_file: i64,
++    eventtime: f64,
++    data: Vec<(f64, f64, f64, f64)>,
++    peaks: Vec<Peak>,
++    switch_times: Vec<(f64, f64)>,
++}
++
++impl<'a> Drv8833PidAutoTune<'a> {
++    fn new(lane: &'a PrinterDrv8833, gcmd: &'a GCodeCommand) -> KResult<Self> {
++        let target_speed = gcmd.get_float("SPEED", Some(40.0), Lim::new().above(0.0))?;
++        let direction = parse_direction(gcmd)?;
++        let band = gcmd.get_float("BAND", Some(py_max(AUTOTUNE_MIN_BAND, target_speed * AUTOTUNE_BAND_RATIO)), Lim::new().above(0.0))?;
++        let settle_time = gcmd.get_float("SETTLE_TIME", Some(AUTOTUNE_SETTLE_TIME), Lim::new().above(0.0))?;
++        let sample_time = gcmd.get_float("SAMPLE_TIME", Some(AUTOTUNE_SAMPLE_TIME), Lim::new().above(0.0))?;
++        let timeout = gcmd.get_float("TIMEOUT", Some(AUTOTUNE_TIMEOUT), Lim::new().above(0.0))?;
++        let write_file = gcmd.get_int("WRITE_FILE", Some(0), Lim::new())?;
++        Ok(Drv8833PidAutoTune {
++            lane,
++            gcmd,
++            controller: lane.hall_controller.clone(),
++            target_speed,
++            direction,
++            band,
++            settle_time,
++            sample_time,
++            timeout,
++            write_file,
++            eventtime: lane.reactor.monotonic(),
++            data: vec![],
++            peaks: vec![],
++            switch_times: vec![],
++        })
++    }
++
++    fn pause(&mut self, duration: f64) -> KResult<f64> {
++        self.eventtime = self.lane.reactor.pause(self.eventtime + duration)?;
++        Ok(self.eventtime)
++    }
++
++    fn wait_for_status(&mut self, timeout: f64) -> KResult<(f64, f64, f64)> {
++        let c = self.controller.clone();
++        let start_seq = c.status_sequence.get();
++        let deadline = self.eventtime + timeout;
++        while c.status_sequence.get() == start_seq {
++            self.eventtime = self.lane.reactor.pause(py_min(deadline, self.eventtime + MCU_REPORT_INTERVAL))?;
++            if self.eventtime >= deadline && c.status_sequence.get() == start_seq {
++                return Err(self.gcmd.error("Timed out waiting for drv8833 status update"));
++            }
++        }
++        // (python: last_status_time or eventtime)
++        let t = if c.last_status_time.get() != 0.0 { c.last_status_time.get() } else { self.eventtime };
++        let sample = (t, c.last_speed_mm_s.get(), c.last_duty_cycle.get());
++        self.data.push((sample.0, sample.1, sample.2, self.target_speed));
++        Ok(sample)
++    }
++
++    fn measure_speed(&mut self, duty_cycle: f64) -> KResult<f64> {
++        self.lane.start_manual(self.direction, duty_cycle)?;
++        self.pause(self.settle_time)?;
++        let endtime = self.eventtime + self.sample_time;
++        let mut samples = vec![];
++        while self.eventtime < endtime {
++            let (_, speed, _) = self.wait_for_status(1.0)?;
++            samples.push(speed);
++        }
++        if samples.is_empty() {
++            samples.push(self.controller.last_speed_mm_s.get());
++        }
++        let avg_speed = samples.iter().sum::<f64>() / samples.len() as f64;
++        self.gcmd.respond_info(
++            &format!("drv8833 {} tune sample: duty={:.2}% speed={:.3}mm/s", self.lane.name, duty_cycle, avg_speed),
++            true,
++        );
++        Ok(avg_speed)
++    }
++
++    fn find_baseline_duty(&mut self) -> KResult<f64> {
++        let max_speed = self.measure_speed(100.0)?;
++        if max_speed < self.target_speed {
++            return Err(self.gcmd.error(format!(
++                "Target speed {:.3}mm/s is not reachable; max observed {:.3}mm/s",
++                self.target_speed, max_speed
++            )));
++        }
++        let (mut low, mut high) = (0.0, 100.0);
++        for _ in 0..AUTOTUNE_BASELINE_STEPS {
++            let baseline = 0.5 * (low + high);
++            let speed = self.measure_speed(baseline)?;
++            if speed < self.target_speed {
++                low = baseline;
++            } else {
++                high = baseline;
++            }
++        }
++        Ok(0.5 * (low + high))
++    }
++
++    fn check_peak(&mut self, sample_time: f64, speed: f64, target: f64) {
++        let (mut peak_time, mut peak_speed, mut peak_kind): (f64, f64, Option<&'static str>) = match self.peaks.last() {
++            Some(&(t, s, k)) => (t, s, Some(k)),
++            None => (sample_time, target, None),
++        };
++        if speed > target {
++            if peak_kind != Some("high") || speed > peak_speed {
++                (peak_time, peak_speed, peak_kind) = (sample_time, speed, Some("high"));
++            }
++        } else if speed < target && (peak_kind != Some("low") || speed < peak_speed) {
++            (peak_time, peak_speed, peak_kind) = (sample_time, speed, Some("low"));
++        }
++        let unchanged = matches!(self.peaks.last(), Some(&(t, s, k)) if (t, s, Some(k)) == (peak_time, peak_speed, peak_kind));
++        if !unchanged {
++            match (self.peaks.last_mut(), peak_kind) {
++                (Some(last), Some(kind)) if last.2 == kind => *last = (peak_time, peak_speed, kind),
++                (_, Some(kind)) => self.peaks.push((peak_time, peak_speed, kind)),
++                (_, None) => {}
++            }
++        }
++    }
++
++    fn collect_relay_response(&mut self, low_duty: f64, high_duty: f64) -> KResult<Vec<((f64, f64), (f64, f64))>> {
++        let target_low = self.target_speed - self.band;
++        let target_high = self.target_speed + self.band;
++        let mut driving_high = true;
++        self.lane.start_manual(self.direction, high_duty)?;
++        self.switch_times = vec![(self.eventtime, high_duty)];
++        let deadline = self.eventtime + self.timeout;
++        while self.eventtime < deadline {
++            let (sample_time, speed, _) = self.wait_for_status(1.0)?;
++            self.check_peak(sample_time, speed, self.target_speed);
++            if driving_high && speed >= target_high {
++                driving_high = false;
++                self.controller.manual_start(self.direction, low_duty)?;
++                self.switch_times.push((sample_time, low_duty));
++            } else if !driving_high && speed <= target_low {
++                driving_high = true;
++                self.controller.manual_start(self.direction, high_duty)?;
++                self.switch_times.push((sample_time, high_duty));
++            }
++            let pairs = self.get_peak_pairs();
++            if pairs.len() >= AUTOTUNE_REQUIRED_PAIRS {
++                return Ok(pairs);
++            }
++        }
++        Err(self.gcmd.error("drv8833 PID tune timed out before converging"))
++    }
++
++    fn get_peak_pairs(&self) -> Vec<((f64, f64), (f64, f64))> {
++        let mut pairs = vec![];
++        let mut last_low = None;
++        for &(sample_time, speed, kind) in &self.peaks {
++            if kind == "low" {
++                last_low = Some((sample_time, speed));
++            } else if kind == "high" {
++                if let Some(low) = last_low.take() {
++                    pairs.push((low, (sample_time, speed)));
++                }
++            }
++        }
++        pairs
++    }
++
++    /// (Kp, Ki, Kd, Ku, Tu, amplitude)
++    fn calc_pid(&self, relay_duty: f64, pairs: &[((f64, f64), (f64, f64))]) -> KResult<[f64; 6]> {
++        let pairs = &pairs[pairs.len().saturating_sub(AUTOTUNE_REQUIRED_PAIRS)..];
++        let high_times: Vec<f64> = pairs.iter().map(|(_, high)| high.0).collect();
++        if high_times.len() < 2 {
++            return Err(self.gcmd.error("Not enough high peaks collected for PID tuning"));
++        }
++        let amplitudes: Vec<f64> = pairs.iter().map(|(low, high)| 0.5 * (high.1 - low.1)).collect();
++        let amplitude = amplitudes.iter().sum::<f64>() / amplitudes.len() as f64;
++        if amplitude <= 0.0 {
++            return Err(self.gcmd.error("Measured relay oscillation amplitude is invalid"));
++        }
++        let periods: Vec<f64> = high_times.windows(2).map(|w| w[1] - w[0]).collect();
++        let tu = periods.iter().sum::<f64>() / periods.len() as f64;
++        let ku = 4.0 * relay_duty / (std::f64::consts::PI * amplitude);
++        let kp = 0.6 * ku;
++        let ki = kp / (0.5 * tu);
++        let kd = kp * (0.125 * tu);
++        Ok([kp, ki, kd, ku, tu, amplitude])
++    }
++
++    fn write_file_data(&self, filename: &str) -> KResult<()> {
++        let lines: Vec<String> = self.data.iter().map(|s| format!("{:.5},{:.5},{:.5},{:.5}", s.0, s.1, s.2, s.3)).collect();
++        std::fs::write(filename, format!("time,speed,duty,target\n{}", lines.join("\n")))
++            .map_err(|e| KError::Py(crate::pyfmt::py_oserror_class(&e).into(), crate::pyfmt::py_oserror(&e, filename)))
++    }
++
++    /// pid_kp, pid_ki, pid_kd, ultimate_gain, ultimate_period, amplitude,
++    /// baseline_duty, relay_duty
++    fn run(&mut self) -> KResult<[f64; 8]> {
++        let baseline = self.find_baseline_duty()?;
++        let relay_duty = self.gcmd.get_float(
++            "RELAY_DUTY",
++            Some(clamp(baseline * AUTOTUNE_RELAY_RATIO, AUTOTUNE_MIN_RELAY_DUTY, AUTOTUNE_MAX_RELAY_DUTY)),
++            Lim::new().above(0.0).max(50.0),
++        )?;
++        let low_duty = clamp(baseline - relay_duty, 0.0, 100.0);
++        let high_duty = clamp(baseline + relay_duty, 0.0, 100.0);
++        let relay_duty = 0.5 * (high_duty - low_duty);
++        if high_duty - low_duty < 1.0 {
++            return Err(self.gcmd.error("Relay duty window is too small to tune"));
++        }
++        self.gcmd.respond_info(
++            &format!(
++                "drv8833 {} tune baseline={:.2}% relay_low={:.2}% relay_high={:.2}% band={:.3}mm/s",
++                self.lane.name, baseline, low_duty, high_duty, self.band
++            ),
++            true,
++        );
++        let pairs = self.collect_relay_response(low_duty, high_duty)?;
++        let [kp, ki, kd, ku, tu, amplitude] = self.calc_pid(relay_duty, &pairs)?;
++        if self.write_file != 0 {
++            let filename = format!("/tmp/drv8833_{}_pid_tune.csv", self.lane.name);
++            self.write_file_data(&filename)?;
++            self.gcmd.respond_info(&format!("drv8833 tune data written to {}", filename), true);
++        }
++        Ok([kp, ki, kd, ku, tu, amplitude, baseline, relay_duty])
++    }
++}
++
++/// DIRECTION=forwards|backwards as 1 / -1
++fn parse_direction(gcmd: &GCodeCommand) -> KResult<i64> {
++    let direction = crate::pyfmt::py_strip(&gcmd.get_or("DIRECTION", "forwards")).to_lowercase();
++    if !["forwards", "forward", "backwards", "backward"].contains(&direction.as_str()) {
++        return Err(gcmd.error("DIRECTION must be forwards or backwards"));
++    }
++    Ok(if direction.starts_with("for") { 1 } else { -1 })
++}
++
++const CMD_MOVE_DEBUG_HELP: &str = "Run a timed DRV8833 debug move";
++const CMD_DRV_SET_SPEED_HELP: &str = "Set DRV8833 speed in mm/s";
++const CMD_DRV_MOVE_HELP: &str = "Run a DRV8833 move for a target distance in mm";
++const CMD_DRV8833_PID_TUNE_HELP: &str = "Run relay autotune for DRV8833 PID gains";
++const CMD_SET_DRV8833_PID_HELP: &str = "Update DRV8833 PID gains";
++
++/// the commands of every [drv8833] section, dispatched by NAME
++struct Drv8833CommandHelper {
++    printer: Rc<Printer>,
++}
++
++impl PrinterObject for Drv8833CommandHelper {}
++
++impl Drv8833CommandHelper {
++    fn new(printer: &Rc<Printer>) -> KResult<Rc<Self>> {
++        let h = Rc::new(Drv8833CommandHelper { printer: printer.clone() });
++        let gcode = printer.lookup::<GCodeDispatch>("gcode")?;
++        type Cmd = fn(&PrinterDrv8833, &GCodeCommand) -> KResult<()>;
++        let commands: [(&str, Cmd, &str); 7] = [
++            ("MOVE_DEBUG", PrinterDrv8833::cmd_move_debug, CMD_MOVE_DEBUG_HELP),
++            ("DRV_SET_SPEED", PrinterDrv8833::cmd_drv_set_speed, CMD_DRV_SET_SPEED_HELP),
++            ("DRV_MOVE", PrinterDrv8833::cmd_drv_move, CMD_DRV_MOVE_HELP),
++            ("DRV_PID_TUNE", PrinterDrv8833::cmd_drv8833_pid_tune, CMD_DRV8833_PID_TUNE_HELP),
++            ("DRV8833_PID_TUNE", PrinterDrv8833::cmd_drv8833_pid_tune, CMD_DRV8833_PID_TUNE_HELP),
++            ("DRV_SET_PID", PrinterDrv8833::cmd_set_drv8833_pid, CMD_SET_DRV8833_PID_HELP),
++            ("SET_DRV8833_PID", PrinterDrv8833::cmd_set_drv8833_pid, CMD_SET_DRV8833_PID_HELP),
++        ];
++        for (name, func, desc) in commands {
++            let hh = h.clone();
++            gcode.register_command(name, Some(Rc::new(move |g| {
++                let lane = hh.lookup_lane(g)?;
++                func(&lane, g)
++            })), false, Some(desc))?;
++        }
++        Ok(h)
++    }
++
++    fn lookup_lane(&self, gcmd: &GCodeCommand) -> KResult<Rc<PrinterDrv8833>> {
++        let lanes: Vec<(String, Rc<PrinterDrv8833>)> = self
++            .printer
++            .lookup_objects(Some("drv8833"))
++            .into_iter()
++            .filter_map(|(n, o)| downcast_rc::<PrinterDrv8833>(o).map(|l| (n, l)))
++            .collect();
++        if lanes.is_empty() {
++            return Err(gcmd.error("No [drv8833] sections configured"));
++        }
++        if let Some(name) = gcmd.get_opt("NAME") {
++            let find = |n: &str| lanes.iter().find(|(k, _)| k == n).map(|(_, l)| l.clone());
++            return find(&format!("drv8833 {}", name))
++                .or_else(|| find(&name))
++                .ok_or_else(|| gcmd.error(format!("Unknown drv8833 NAME '{}'", name)));
++        }
++        if lanes.len() == 1 {
++            return Ok(lanes[0].1.clone());
++        }
++        let mut sections: Vec<&str> = lanes.iter().map(|(k, _)| k.as_str()).collect();
++        sections.sort();
++        let names: Vec<&str> = sections.iter().map(|s| s.split_once(' ').map_or(*s, |x| x.1)).collect();
++        Err(gcmd.error(format!("MOVE_DEBUG requires NAME=<drv8833>; available: {}", names.join(", "))))
++    }
++}
++
++pub struct PrinterDrv8833 {
++    printer: Rc<Printer>,
++    reactor: Rc<Reactor>,
++    gcode: Rc<GCodeDispatch>,
++    section_name: String,
++    name: String,
++    hall_controller: Rc<McuDrv8833Controller>,
++    active: Cell<bool>,
++    manual_mode: Cell<bool>,
++    direction: Cell<i64>,
++    direction_name: Cell<&'static str>,
++    target_speed: Cell<f64>,
++    /// MOVE_DEBUG is running: the hall status is reported
++    debug: Cell<bool>,
++    debug_next_log_time: Cell<f64>,
++    debug_hall_start: Cell<i64>,
++}
++
++impl PrinterDrv8833 {
++    fn new(config: &ConfigWrapper) -> KResult<Rc<Self>> {
++        let printer = config.get_printer();
++        let section_name = config.get_name().to_string();
++        let name = match section_name.split_whitespace().collect::<Vec<_>>().as_slice() {
++            [_, ..] if section_name.split_once(char::is_whitespace).is_some() => {
++                crate::pyfmt::py_lstrip(section_name.split_once(char::is_whitespace).unwrap().1).to_string()
++            }
++            _ => section_name.clone(),
++        };
++        let ppins = printer.lookup::<PinsObject>("pins")?;
++        let pin = |option: &str, can_pullup: bool| -> KResult<(Rc<Mcu>, String, i64)> {
++            let desc = config.get(option, Dflt::Required)?;
++            let pp = ppins.0.borrow_mut().lookup_pin(&desc, false, can_pullup, None).map_err(|e| KError::Pins(e.0))?;
++            let mcu = pin_mcu(config, &pp)?;
++            let p = pp.borrow();
++            Ok((mcu, p.pin.clone(), p.pullup))
++        };
++        let (mcu, motor_fwd_pin, _) = pin("motor_fwd", false)?;
++        let (rwd_mcu, motor_rwd_pin, _) = pin("motor_rwd", false)?;
++        let (hall_mcu, hall_pin, hall_pullup) = pin("motor_hall", true)?;
++        if !Rc::ptr_eq(&rwd_mcu, &mcu) {
++            return Err(KError::config("drv8833 motor_fwd and motor_rwd must be on the same mcu"));
++        }
++        if !Rc::ptr_eq(&hall_mcu, &mcu) {
++            return Err(KError::config("drv8833 motor_hall, motor_fwd, and motor_rwd must be on the same mcu"));
++        }
++        let hall_controller = McuDrv8833Controller::new(config, &mcu, motor_fwd_pin, motor_rwd_pin, hall_pin, hall_pullup)?;
++        let d = Rc::new(PrinterDrv8833 {
++            reactor: printer.get_reactor(),
++            gcode: printer.lookup::<GCodeDispatch>("gcode")?,
++            printer: printer.clone(),
++            section_name,
++            name,
++            hall_controller: hall_controller.clone(),
++            active: Cell::new(false),
++            manual_mode: Cell::new(false),
++            direction: Cell::new(1),
++            direction_name: Cell::new("forwards"),
++            target_speed: Cell::new(0.0),
++            debug: Cell::new(false),
++            debug_next_log_time: Cell::new(0.0),
++            debug_hall_start: Cell::new(0),
++        });
++        let w = Rc::downgrade(&d);
++        *hall_controller.status_callback.borrow_mut() = Some(Rc::new(move || {
++            if let Some(d) = w.upgrade() {
++                d.handle_hall_status();
++            }
++        }));
++        if printer.lookup_object_opt("drv8833_command_helper").is_none() {
++            let helper = Drv8833CommandHelper::new(&printer)?;
++            printer.add_object("drv8833_command_helper", helper)?;
++        }
++        let dd = d.clone();
++        crate::events::GcodeRequestRestart::on(&printer, move |_print_time| dd.stop());
++        let dd = d.clone();
++        crate::events::KlippyShutdown::on(&printer, move || dd.stop());
++        Ok(d)
++    }
++
++    fn handle_hall_status(&self) {
++        let c = &self.hall_controller;
++        self.active.set(c.last_active.get());
++        self.manual_mode.set(c.last_manual.get());
++        if !self.active.get() {
++            self.target_speed.set(0.0);
++        }
++        if !self.debug.get() {
++            return;
++        }
++        let eventtime = self.reactor.monotonic();
++        if eventtime < self.debug_next_log_time.get() {
++            return;
++        }
++        self.debug_next_log_time.set(eventtime + DEBUG_LOG_INTERVAL);
++        let msg = self.format_debug_message();
++        let gcode = self.gcode.clone();
++        self.reactor.register_async_callback_local(move |_| gcode.respond_info(&msg, true), NOW);
++    }
++
++    fn set_direction(&self, direction: i64) {
++        self.direction.set(direction);
++        self.direction_name.set(if direction > 0 { "forwards" } else { "backwards" });
++    }
++
++    fn start_move(&self, direction: i64, target_speed: f64, stop_ticks: i64) -> KResult<()> {
++        if self.active.get() {
++            return Err(KError::command(format!("drv8833 {} is already running", self.name)));
++        }
++        self.active.set(true);
++        self.manual_mode.set(false);
++        self.set_direction(direction);
++        self.target_speed.set(target_speed);
++        self.hall_controller.start_move(direction, target_speed, stop_ticks)
++    }
++
++    fn start_manual(&self, direction: i64, duty_cycle: f64) -> KResult<()> {
++        self.active.set(true);
++        self.manual_mode.set(true);
++        self.set_direction(direction);
++        self.target_speed.set(0.0);
++        self.hall_controller.manual_start(direction, duty_cycle)
++    }
++
++    fn stop(&self) -> KResult<()> {
++        if !self.active.get() {
++            return Ok(());
++        }
++        self.active.set(false);
++        self.manual_mode.set(false);
++        self.target_speed.set(0.0);
++        self.hall_controller.stop()
++    }
++
++    pub fn set_pid_gains(&self, kp: f64, ki: f64, kd: f64, save_to_config: bool) -> KResult<()> {
++        self.hall_controller.set_pid(kp, ki, kd)?;
++        if save_to_config {
++            let configfile = self.printer.lookup::<ConfigFileObject>("configfile")?;
++            let mut pconfig = configfile.pconfig.borrow_mut();
++            pconfig.set(&self.section_name, "pid_kp", &format!("{:.6}", kp))?;
++            pconfig.set(&self.section_name, "pid_ki", &format!("{:.6}", ki))?;
++            pconfig.set(&self.section_name, "pid_kd", &format!("{:.6}", kd))?;
++        }
++        Ok(())
++    }
++
++    /// (hall_clicks, hall_mm) since the debug move started
++    fn debug_totals(&self) -> (i64, f64) {
++        let hall_clicks = self.hall_controller.last_count.get() - self.debug_hall_start.get();
++        (hall_clicks, hall_clicks as f64 * self.hall_controller.hall_resolution)
++    }
++
++    fn wait_for_move_complete(&self, mut eventtime: f64) -> KResult<f64> {
++        while self.active.get() {
++            eventtime = self.reactor.pause(eventtime + MCU_REPORT_INTERVAL)?;
++        }
++        Ok(eventtime)
++    }
++
++    fn format_debug_message(&self) -> String {
++        let (hall_clicks, _) = self.debug_totals();
++        format!(
++            "drv8833 {}: direction={} target={:.3}mm/s hall_clicks={} hall_speed={:.3}mm/s duty={:.1}%",
++            self.name,
++            self.direction_name.get(),
++            self.target_speed.get(),
++            hall_clicks,
++            self.hall_controller.last_speed_mm_s.get(),
++            self.hall_controller.last_duty_cycle.get()
++        )
++    }
++
++    /// Drv8833Interface.drv8833_set_speed
++    pub fn drv8833_set_speed(&self, speed: f64) -> KResult<()> {
++        if speed == 0.0 {
++            return self.stop();
++        }
++        let direction = if speed > 0.0 { 1 } else { -1 };
++        if self.active.get() {
++            self.stop()?;
++        }
++        self.start_move(direction, speed.abs(), 0)
++    }
++
++    /// Drv8833Interface.drv8833_move
++    pub fn drv8833_move(&self, mut speed: f64, distance: f64, wait_for_completion: bool) -> KResult<()> {
++        let eventtime = self.reactor.monotonic();
++        if distance < 0.0 {
++            speed *= -1.0;
++        }
++        let distance = distance.abs();
++        if speed == 0.0 || distance == 0.0 {
++            return self.stop();
++        }
++        let direction = if speed > 0.0 { 1 } else { -1 };
++        let stop_ticks = 1.max(iround(distance / self.hall_controller.hall_resolution));
++        if self.active.get() {
++            self.stop()?;
++        }
++        self.start_move(direction, speed.abs(), stop_ticks)?;
++        if wait_for_completion {
++            self.wait_for_move_complete(eventtime)?;
++        }
++        Ok(())
++    }
++
++    fn cmd_move_debug(&self, gcmd: &GCodeCommand) -> KResult<()> {
++        let duration = gcmd.get_float("TIME", Some(5.0), Lim::new().above(0.0))?;
++        let direction = crate::pyfmt::py_strip(&gcmd.get_or("DIRECTION", "forwards")).to_lowercase();
++        let speed = gcmd.get_float("SPEED", Some(40.0), Lim::new().min(0.0))?;
++        if !["forwards", "forward", "backwards", "backward"].contains(&direction.as_str()) {
++            return Err(gcmd.error("DIRECTION must be forwards or backwards"));
++        }
++        let direction_value = if direction.starts_with("for") { 1 } else { -1 };
++        let mut eventtime = self.reactor.monotonic();
++        self.debug.set(true);
++        self.debug_next_log_time.set(eventtime);
++        // The MCU resets hall count to zero at the start of each move.
++        self.debug_hall_start.set(0);
++        let res = (|| -> KResult<()> {
++            self.start_move(direction_value, speed, 0)?;
++            let endtime = eventtime + duration;
++            while eventtime < endtime {
++                eventtime = self.reactor.pause(endtime)?;
++            }
++            Ok(())
++        })();
++        // (finally)
++        self.debug.set(false);
++        let stopped = self.stop();
++        res?;
++        stopped?;
++        let (hall_clicks, hall_mm) = self.debug_totals();
++        gcmd.respond_info(
++            &format!("drv8833 {} move complete: hall_clicks={} hall_distance={:.3}mm", self.name, hall_clicks, hall_mm),
++            true,
++        );
++        Ok(())
++    }
++
++    fn cmd_drv_set_speed(&self, gcmd: &GCodeCommand) -> KResult<()> {
++        let speed = gcmd.get_float("SPEED", None, Lim::new())?;
++        self.drv8833_set_speed(speed)?;
++        gcmd.respond_info(&format!("drv8833 {} speed set to {:.3}mm/s", self.name, speed), true);
++        Ok(())
++    }
++
++    fn cmd_drv_move(&self, gcmd: &GCodeCommand) -> KResult<()> {
++        let speed = gcmd.get_float("SPEED", None, Lim::new())?;
++        let distance = gcmd.get_float("DISTANCE", None, Lim::new())?;
++        self.drv8833_move(speed, distance, true)?;
++        let hall_clicks = self.hall_controller.last_count.get();
++        let hall_mm = hall_clicks as f64 * self.hall_controller.hall_resolution;
++        gcmd.respond_info(
++            &format!(
++                "drv8833 {} move complete: speed={:.3}mm/s distance={:.3}mm hall_clicks={} hall_distance={:.3}mm",
++                self.name, speed, distance, hall_clicks, hall_mm
++            ),
++            true,
++        );
++        Ok(())
++    }
++
++    fn cmd_set_drv8833_pid(&self, gcmd: &GCodeCommand) -> KResult<()> {
++        let c = &self.hall_controller;
++        let kp = gcmd.get_float("KP", Some(c.pid_kp.get()), Lim::new().min(0.0))?;
++        let ki = gcmd.get_float("KI", Some(c.pid_ki.get()), Lim::new().min(0.0))?;
++        let kd = gcmd.get_float("KD", Some(c.pid_kd.get()), Lim::new().min(0.0))?;
++        let save_to_config = gcmd.get_int("SAVE", Some(0), Lim::new())? != 0;
++        self.set_pid_gains(kp, ki, kd, save_to_config)?;
++        let mut msg = format!("drv8833 {} PID updated: pid_kp={:.6} pid_ki={:.6} pid_kd={:.6}", self.name, kp, ki, kd);
++        if save_to_config {
++            msg.push_str("\nThe SAVE_CONFIG command will update the printer config file and restart the printer.");
++        }
++        gcmd.respond_info(&msg, true);
++        Ok(())
++    }
++
++    fn cmd_drv8833_pid_tune(&self, gcmd: &GCodeCommand) -> KResult<()> {
++        if self.active.get() {
++            return Err(gcmd.error(format!("drv8833 {} is already running", self.name)));
++        }
++        let mut tuner = Drv8833PidAutoTune::new(self, gcmd)?;
++        let result = tuner.run();
++        // (finally)
++        let stopped = self.stop();
++        let [kp, ki, kd, ku, tu, amplitude, baseline, relay_duty] = result?;
++        stopped?;
++        self.set_pid_gains(kp, ki, kd, true)?;
++        gcmd.respond_info(
++            &format!(
++                "drv8833 {} PID tune at {:.3}mm/s: pid_kp={:.6} pid_ki={:.6} pid_kd={:.6}\n\
++                 Ku={:.6} Tu={:.6}s amplitude={:.6}mm/s baseline_duty={:.2}% relay_duty={:.2}%\n\
++                 The SAVE_CONFIG command will update the printer config file and restart the printer.",
++                self.name, tuner.target_speed, kp, ki, kd, ku, tu, amplitude, baseline, relay_duty
++            ),
++            true,
++        );
++        Ok(())
++    }
++}
++
++impl PrinterObject for PrinterDrv8833 {
++    fn has_status(&self) -> bool {
++        true
++    }
++    fn get_status(&self, _eventtime: f64) -> Option<PyVal> {
++        let c = &self.hall_controller;
++        Some(PyVal::Dict(crate::pydict! {
++            "active" => PyVal::Bool(self.active.get()),
++            "manual" => PyVal::Bool(self.manual_mode.get()),
++            "direction" => PyVal::from(self.direction_name.get()),
++            "target_speed" => PyVal::Float(self.target_speed.get()),
++            "duty_cycle" => PyVal::Float(c.last_duty_cycle.get()),
++            "hall_speed" => PyVal::Float(c.last_speed_mm_s.get()),
++            "pid_kp" => PyVal::Float(c.pid_kp.get()),
++            "pid_ki" => PyVal::Float(c.pid_ki.get()),
++            "pid_kd" => PyVal::Float(c.pid_kd.get()),
++        }))
++    }
++}
++
++pub fn load_config_prefix(config: &ConfigWrapper) -> KResult<PObj> {
++    Ok(PrinterDrv8833::new(config)?)
++}
+diff --git a/src/extras/mod.rs b/src/extras/mod.rs
+index 148d78d..4a2aa55 100644
+--- a/src/extras/mod.rs
++++ b/src/extras/mod.rs
+@@ -38,6 +38,8 @@ pub mod display_status;
+ pub mod display_templates;
+ pub mod dockable_probe;
+ pub mod dotstar;
++// COSMOS 0003 (Rusticc)
++pub mod drv8833;
+ pub mod ds18b20;
+ pub mod duplicate_pin_override;
+ pub mod endstop_phase;
+@@ -190,6 +192,7 @@ pub static MODULES: &[PrinterModule] = &[
+     PrinterModule { name: "display_status", ported: true, load_config: Some(display_status::load_config), load_config_prefix: None, register_components: None },
+     PrinterModule { name: "dockable_probe", ported: true, load_config: Some(dockable_probe::load_config), load_config_prefix: None, register_components: None },
+     PrinterModule { name: "dotstar", ported: true, load_config: None, load_config_prefix: Some(dotstar::load_config_prefix), register_components: None },
++    PrinterModule { name: "drv8833", ported: true, load_config: None, load_config_prefix: Some(drv8833::load_config_prefix), register_components: None },
+     PrinterModule { name: "ds18b20", ported: true, load_config: Some(ds18b20::load_config), load_config_prefix: None, register_components: None },
+     PrinterModule { name: "duplicate_pin_override", ported: true, load_config: Some(duplicate_pin_override::load_config), load_config_prefix: Some(duplicate_pin_override::load_config_prefix), register_components: None },
+     PrinterModule { name: "endstop_phase", ported: true, load_config: Some(endstop_phase::load_config), load_config_prefix: Some(endstop_phase::load_config_prefix), register_components: None },

@@ -5,6 +5,8 @@
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 # (in the kaliru tree with the Rusticc patches: tools/kaliru-tree.sh)
 cd "${KALIRU:-$HERE/work/kaliru}"
+# python plugins / OpenRFID on kaliru's embedded CPython (as tools/case_cmp.sh in kaliru)
+export KALIRU_LIBPYTHON=${KALIRU_LIBPYTHON:-$HOME/.local/share/uv/python/cpython-3.15-linux-x86_64-gnu/lib/libpython3.15.so.1.0}
 tests=()
 for t in "$@"; do tests+=("$(realpath "$t")"); done
 rm -rf ~/rk/rusticc_py ~/rk/rusticc_rs

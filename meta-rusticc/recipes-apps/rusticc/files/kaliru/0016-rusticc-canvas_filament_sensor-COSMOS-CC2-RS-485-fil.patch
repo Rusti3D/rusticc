@@ -1,0 +1,760 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 13:19:35 +0200
+Subject: [PATCH 16/20] rusticc: canvas_filament_sensor (COSMOS, CC2 RS-485
+ filament sensor)
+
+The sensor as a pin chip answering buttons' MCU calls itself:
+buttons::ButtonsHost is the set of MCU calls McuButtons makes (python takes any
+object with them), implemented for Mcu and the sensor; PinChip::buttons_host()
+offers it. Uart::fd() for the sensor's port reads.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
+---
+ src/extras/buttons.rs                |  76 +++-
+ src/extras/canvas_filament_sensor.rs | 533 +++++++++++++++++++++++++++
+ src/extras/mod.rs                    |   3 +
+ src/pins.rs                          |   5 +
+ src/serialhdl.rs                     |   5 +
+ 5 files changed, 610 insertions(+), 12 deletions(-)
+ create mode 100644 src/extras/canvas_filament_sensor.rs
+
+diff --git a/src/extras/buttons.rs b/src/extras/buttons.rs
+index e8cdc6a..e2df1ec 100644
+--- a/src/extras/buttons.rs
++++ b/src/extras/buttons.rs
+@@ -7,7 +7,8 @@ use crate::configfile::{ConfigWrapper, Lim};
+ use crate::error::{KError, KResult};
+ use crate::extras::query_adc::QueryADC;
+ use crate::logging;
+-use crate::mcu::{get_printer_mcu, ints, pint, CommandWrapper, Mcu};
++use crate::chelper::serialqueue::CommandQueue;
++use crate::mcu::{get_printer_mcu, ints, pint, Mcu};
+ use crate::msgproto::{Params, Val};
+ use crate::pins::PinsObject;
+ use crate::printer::{PObj, Printer, PrinterObject};
+@@ -42,20 +43,66 @@ fn run_callback(reactor: &Reactor, cb: ButtonCallback, eventtime_override: Optio
+ pub const QUERY_TIME: f64 = 0.002;
+ pub const RETRANSMIT_COUNT: i64 = 50;
+ 
++/// a command MCU_buttons sends (buttons_ack)
++pub type ButtonsCommand = Rc<dyn Fn(&[Val]) -> KResult<()>>;
++
++/// The MCU calls MCU_buttons makes. Python takes any object that has these
++/// methods: kaliru's MCUs, and pin chips that answer them themselves
++/// (COSMOS's canvas_filament_sensor emulates a buttons MCU)
++pub trait ButtonsHost {
++    fn register_config_callback(&self, cb: Rc<dyn Fn() -> KResult<()>>);
++    fn create_oid(&self) -> i64;
++    fn add_config_cmd(&self, cmd: &str, is_init: bool, on_restart: bool) -> KResult<()>;
++    fn alloc_command_queue(&self) -> Option<CommandQueue>;
++    fn lookup_command(&self, msgformat: &str, cq: Option<CommandQueue>) -> KResult<ButtonsCommand>;
++    fn get_query_slot(&self, oid: i64) -> i64;
++    fn seconds_to_clock(&self, time: f64) -> i64;
++    fn register_response(&self, cb: Rc<dyn Fn(&Params) -> KResult<()>>, msg: &str, oid: i64);
++}
++
++impl ButtonsHost for Mcu {
++    fn register_config_callback(&self, cb: Rc<dyn Fn() -> KResult<()>>) {
++        Mcu::register_config_callback(self, cb)
++    }
++    fn create_oid(&self) -> i64 {
++        Mcu::create_oid(self)
++    }
++    fn add_config_cmd(&self, cmd: &str, is_init: bool, on_restart: bool) -> KResult<()> {
++        Mcu::add_config_cmd(self, cmd, is_init, on_restart);
++        Ok(())
++    }
++    fn alloc_command_queue(&self) -> Option<CommandQueue> {
++        Some(Mcu::alloc_command_queue(self))
++    }
++    fn lookup_command(&self, msgformat: &str, cq: Option<CommandQueue>) -> KResult<ButtonsCommand> {
++        let cmd = Mcu::lookup_command(self, msgformat, cq)?;
++        Ok(Rc::new(move |data| cmd.send(data, 0, 0)))
++    }
++    fn get_query_slot(&self, oid: i64) -> i64 {
++        Mcu::get_query_slot(self, oid)
++    }
++    fn seconds_to_clock(&self, time: f64) -> i64 {
++        Mcu::seconds_to_clock(self, time)
++    }
++    fn register_response(&self, cb: Rc<dyn Fn(&Params) -> KResult<()>>, msg: &str, oid: i64) {
++        Mcu::register_response(self, Some(cb), msg, Some(oid))
++    }
++}
++
+ pub struct McuButtons {
+     reactor: Rc<Reactor>,
+-    mcu: Rc<Mcu>,
++    mcu: Rc<dyn ButtonsHost>,
+     pin_list: RefCell<Vec<(String, i64)>>,
+     callbacks: RefCell<Vec<(i64, i64, ButtonCallback)>>,
+     invert: Cell<i64>,
+     last_button: Cell<i64>,
+-    ack_cmd: RefCell<Option<CommandWrapper>>,
++    ack_cmd: RefCell<Option<ButtonsCommand>>,
+     ack_count: Cell<i64>,
+     oid: Cell<i64>,
+ }
+ 
+ impl McuButtons {
+-    fn new(printer: &Printer, mcu: &Rc<Mcu>) -> Rc<Self> {
++    fn new(printer: &Printer, mcu: &Rc<dyn ButtonsHost>) -> Rc<Self> {
+         let b = Rc::new(McuButtons {
+             reactor: printer.get_reactor(),
+             mcu: mcu.clone(),
+@@ -97,12 +144,12 @@ impl McuButtons {
+         self.last_button.set(0);
+         let oid = self.mcu.create_oid();
+         self.oid.set(oid);
+-        self.mcu.add_config_cmd(&format!("config_buttons oid={} button_count={}", oid, pin_list.len()), false, false);
++        self.mcu.add_config_cmd(&format!("config_buttons oid={} button_count={}", oid, pin_list.len()), false, false)?;
+         for (i, (pin, pull_up)) in pin_list.iter().enumerate() {
+-            self.mcu.add_config_cmd(&format!("buttons_add oid={} pos={} pin={} pull_up={}", oid, i, pin, pull_up), true, false);
++            self.mcu.add_config_cmd(&format!("buttons_add oid={} pos={} pin={} pull_up={}", oid, i, pin, pull_up), true, false)?;
+         }
+         let cmd_queue = self.mcu.alloc_command_queue();
+-        *self.ack_cmd.borrow_mut() = Some(self.mcu.lookup_command("buttons_ack oid=%c count=%c", Some(cmd_queue))?);
++        *self.ack_cmd.borrow_mut() = Some(self.mcu.lookup_command("buttons_ack oid=%c count=%c", cmd_queue)?);
+         let clock = self.mcu.get_query_slot(oid);
+         let rest_ticks = self.mcu.seconds_to_clock(QUERY_TIME);
+         self.mcu.add_config_cmd(
+@@ -116,9 +163,9 @@ impl McuButtons {
+             ),
+             true,
+             false,
+-        );
++        )?;
+         let b = self.clone();
+-        self.mcu.register_response(Some(Rc::new(move |p: &Params| b.handle_buttons_state(p))), "buttons_state", Some(oid));
++        self.mcu.register_response(Rc::new(move |p: &Params| b.handle_buttons_state(p)), "buttons_state", oid);
+         Ok(())
+     }
+ 
+@@ -141,7 +188,7 @@ impl McuButtons {
+         let new_buttons = buttons[start..].to_vec();
+         // Send ack to MCU
+         if let Some(cmd) = self.ack_cmd.borrow().as_ref() {
+-            cmd.send(&ints(&[self.oid.get(), new_count]), 0, 0)?;
++            cmd(&ints(&[self.oid.get(), new_count]))?;
+         }
+         self.ack_count.set(self.ack_count.get() + new_count);
+         // Invoke callbacks with this event in main thread
+@@ -487,9 +534,10 @@ impl PrinterButtons {
+             pin_params_list.push((p.pin.clone(), p.invert, p.pullup));
+         }
+         let mcu_name = mcu_name.unwrap_or_default();
++        let chip_host = chip.as_ref().and_then(|c| c.buttons_host());
+         // a python plugin's chip: MCU_buttons(printer, chip) only registers
+         // its config callback with it
+-        if let Some(chip) = chip {
++        if let Some(chip) = chip.filter(|_| chip_host.is_none()) {
+             let build_config: Rc<dyn Fn() -> KResult<()>> =
+                 Rc::new(|| Err(KError::Other("kaliru: button config on a python plugin's chip is not mirrored".into())));
+             if let Some(res) = chip.register_config_callback(build_config) {
+@@ -501,7 +549,11 @@ impl PrinterButtons {
+         let mcu_buttons = match existing {
+             Some(b) if b.pin_list.borrow().len() + pin_params_list.len() <= 8 => b,
+             _ => {
+-                let mcu = get_printer_mcu(&self.printer, &mcu_name)?;
++                // (a chip answering the MCU calls itself, else the chip's MCU)
++                let mcu: Rc<dyn ButtonsHost> = match chip_host {
++                    Some(h) => h,
++                    None => get_printer_mcu(&self.printer, &mcu_name)?,
++                };
+                 let b = McuButtons::new(&self.printer, &mcu);
+                 self.mcu_buttons.borrow_mut().insert(mcu_name, b.clone());
+                 b
+diff --git a/src/extras/canvas_filament_sensor.rs b/src/extras/canvas_filament_sensor.rs
+new file mode 100644
+index 0000000..2208aef
+--- /dev/null
++++ b/src/extras/canvas_filament_sensor.rs
+@@ -0,0 +1,533 @@
++// Centauri Carbon 2 filament sensor as virtual input pins (emulated MCU)
++// (port of COSMOS's klippy/extras/canvas_filament_sensor.py)
++//
++// Copyright (C) 2026  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++//
++// Exposes the sensor as a pin chip, so the standard filament sensors (and
++// anything else that takes a button pin) can use it: the chip answers the MCU
++// calls that buttons' McuButtons makes (buttons::ButtonsHost) and sends it
++// "buttons_state" messages, as an MCU running the buttons code would.
++//
++// Pins: "filament" is the switch level (1 = filament present); "encoder"
++// toggles once per poll in which the edge counter moved.
++//
++// The sensor talks to the host on the canvas port over RS485:
++//   frame:   3D 80 LEN CRC8 | id cmd data... | CRC16_hi CRC16_lo
++//   CRC8:    poly 0x39, init 0x66, over the 3 header bytes
++//   CRC16:   CCITT poly 0x1021, init 0x913D, over everything before it
++//   cmd 7E:  reply data = [switch level, encoder level, u32be edge count]
++use crate::chelper::serialqueue::CommandQueue;
++use crate::configfile::{ConfigWrapper, Dflt, Lim};
++use crate::error::{KError, KResult};
++use crate::extras::buttons::{ButtonsCommand, ButtonsHost};
++use crate::logging;
++use crate::msgproto::{Params, Val};
++use crate::pins::{PinChip, PinsObject, SharedPinParams};
++use crate::printer::{PObj, Printer, PrinterObject};
++use crate::pyval::PyVal;
++use crate::reactor::{FileHandler, Reactor, Timer, NEVER, NOW};
++use crate::serialhdl::Uart;
++use crate::IndexMap;
++use std::any::Any;
++use std::cell::{Cell, RefCell};
++use std::rc::{Rc, Weak};
++
++const FRAME_START: u8 = 0x3D;
++const FRAME_MARKER: u8 = 0x80;
++const HEADER_LEN: usize = 4; // start, marker, length, CRC8
++const FRAME_OVERHEAD: usize = HEADER_LEN + 2; // + CRC16
++const MIN_FRAME_LEN: usize = FRAME_OVERHEAD + 2; // + id, cmd
++const CRC8_POLY: u8 = 0x39;
++const CRC8_INIT: u8 = 0x66;
++const CRC16_POLY: u16 = 0x1021;
++const CRC16_INIT: u16 = 0x913D;
++const DEVICE_ID: i64 = 0x05;
++const CMD_VERSION: u8 = 0x02;
++const CMD_STATUS: u8 = 0x7E;
++const RETRY_TIME: f64 = 5.0;
++const EDGE_MASK: u32 = 0xFFFFFFFF;
++const PINS: [&str; 2] = ["filament", "encoder"];
++
++// ----------------------------------------------------------------------
++// Framing
++// ----------------------------------------------------------------------
++
++fn crc8(data: &[u8]) -> u8 {
++    let mut crc = CRC8_INIT;
++    for &b in data {
++        crc ^= b;
++        for _ in 0..8 {
++            crc = if crc & 0x80 != 0 { (crc << 1) ^ CRC8_POLY } else { crc << 1 };
++        }
++    }
++    crc
++}
++
++fn crc16(data: &[u8]) -> u16 {
++    let mut crc = CRC16_INIT;
++    for &b in data {
++        crc ^= (b as u16) << 8;
++        for _ in 0..8 {
++            crc = if crc & 0x8000 != 0 { (crc << 1) ^ CRC16_POLY } else { crc << 1 };
++        }
++    }
++    crc
++}
++
++fn build_frame(payload: &[u8]) -> Vec<u8> {
++    let mut frame = vec![FRAME_START, FRAME_MARKER, (payload.len() + FRAME_OVERHEAD) as u8];
++    frame.push(crc8(&frame));
++    frame.extend_from_slice(payload);
++    let c = crc16(&frame);
++    frame.extend_from_slice(&[(c >> 8) as u8, c as u8]);
++    frame
++}
++
++/// Byte-stream parser for short frames; resyncs on FRAME_START
++#[derive(Default)]
++struct FrameParser {
++    buf: Vec<u8>,
++    errors: i64,
++}
++
++impl FrameParser {
++    fn feed(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
++        self.buf.extend_from_slice(data);
++        let mut payloads = vec![];
++        let buf = &mut self.buf;
++        loop {
++            let Some(i) = buf.iter().position(|b| *b == FRAME_START) else {
++                buf.clear();
++                break;
++            };
++            buf.drain(..i);
++            if buf.len() < HEADER_LEN {
++                break;
++            }
++            let length = buf[2] as usize;
++            if buf[1] != FRAME_MARKER || length < MIN_FRAME_LEN || crc8(&buf[..3]) != buf[3] {
++                buf.drain(..1);
++                continue;
++            }
++            if buf.len() < length {
++                break;
++            }
++            let frame = &buf[..length];
++            if crc16(&frame[..length - 2]) != ((frame[length - 2] as u16) << 8) | frame[length - 1] as u16 {
++                self.errors += 1;
++                buf.drain(..1);
++                continue;
++            }
++            payloads.push(frame[HEADER_LEN..length - 2].to_vec());
++            buf.drain(..length);
++        }
++        payloads
++    }
++}
++
++// ----------------------------------------------------------------------
++// Sensor + pin chip: [canvas_filament_sensor]
++// ----------------------------------------------------------------------
++
++/// an McuButtons' button group: its pins (indexes into PINS), its
++/// buttons_state handler, the acks it sent, the last state sent
++struct Group {
++    pins: Vec<usize>,
++    handler: Option<Rc<dyn Fn(&Params) -> KResult<()>>>,
++    ack: i64,
++    last: Option<i64>,
++}
++
++pub struct CanvasFilamentSensor {
++    me: Weak<CanvasFilamentSensor>,
++    printer: Rc<Printer>,
++    reactor: Rc<Reactor>,
++    serial_port: String,
++    baud: i64,
++    device_id: i64,
++    poll_interval: f64,
++    max_missed: i64,
++    chip_name: String,
++    runout_on_disconnect: bool,
++    // Serial state
++    ser: RefCell<Option<Uart>>,
++    fd_handle: RefCell<Option<FileHandler>>,
++    parser: RefCell<FrameParser>,
++    connected: Cell<bool>,
++    awaiting_reply: Cell<bool>,
++    want_version: Cell<bool>,
++    missed: Cell<i64>,
++    version: RefCell<Option<String>>,
++    present: Cell<Option<bool>>,
++    edges: Cell<Option<u32>>,
++    open_error: RefCell<Option<String>>,
++    // Pin state
++    levels: Cell<[i64; 2]>,
++    last_edges: Cell<Option<u32>>,
++    next_oid: Cell<i64>,
++    config_callbacks: RefCell<Vec<Rc<dyn Fn() -> KResult<()>>>>,
++    groups: RefCell<IndexMap<i64, Group>>,
++    poll_timer: RefCell<Option<Timer>>,
++}
++
++impl CanvasFilamentSensor {
++    fn new(config: &ConfigWrapper) -> KResult<Rc<Self>> {
++        let printer = config.get_printer();
++        let reactor = printer.get_reactor();
++        let serial_port = config.get("serial", Dflt::Required)?;
++        let baud = config.getint("baud", 115200, Lim::new().min(2400))?;
++        let device_id = config.getint("device_id", DEVICE_ID, Lim::new().min(0).max(255))?;
++        let poll_interval = config.getfloat("poll_interval", 0.1, Lim::new().min(0.02).max(5.0))?;
++        let max_missed = config.getint("max_missed", 10, Lim::new().min(1))?;
++        let chip_name = config.get("chip_name", "filament_sensor")?;
++        let runout_on_disconnect = config.getboolean("runout_on_disconnect", false)?;
++        let s = Rc::new_cyclic(|me| CanvasFilamentSensor {
++            me: me.clone(),
++            printer: printer.clone(),
++            reactor: reactor.clone(),
++            serial_port,
++            baud,
++            device_id,
++            poll_interval,
++            max_missed,
++            chip_name,
++            runout_on_disconnect,
++            ser: RefCell::new(None),
++            fd_handle: RefCell::new(None),
++            parser: RefCell::new(FrameParser::default()),
++            connected: Cell::new(false),
++            awaiting_reply: Cell::new(false),
++            want_version: Cell::new(false),
++            missed: Cell::new(0),
++            version: RefCell::new(None),
++            present: Cell::new(None),
++            edges: Cell::new(None),
++            open_error: RefCell::new(None),
++            levels: Cell::new([0, 0]),
++            last_edges: Cell::new(None),
++            next_oid: Cell::new(0),
++            config_callbacks: RefCell::new(vec![]),
++            groups: RefCell::new(IndexMap::default()),
++            poll_timer: RefCell::new(None),
++        });
++        let ppins = printer.lookup::<PinsObject>("pins")?;
++        ppins.0.borrow_mut().register_chip(&s.chip_name, s.clone()).map_err(|e| KError::Pins(e.0))?;
++        let w = s.me.clone();
++        *s.poll_timer.borrow_mut() = Some(reactor.register_timer(
++            Box::new(move |eventtime| match w.upgrade() {
++                Some(s) => s.poll_event(eventtime),
++                None => NEVER,
++            }),
++            NEVER,
++        ));
++        let ss = s.clone();
++        crate::events::KlippyConnect::on(&printer, move || ss.connect());
++        let ss = s.clone();
++        crate::events::KlippyReady::on(&printer, move || {
++            ss.update_poll_timer(NOW);
++            Ok(())
++        });
++        let ss = s.clone();
++        crate::events::KlippyDisconnect::on(&printer, move || {
++            ss.update_poll_timer(NEVER);
++            ss.close();
++            Ok(())
++        });
++        Ok(s)
++    }
++
++    fn update_poll_timer(&self, waketime: f64) {
++        if let Some(t) = self.poll_timer.borrow().as_ref() {
++            self.reactor.update_timer(t, waketime);
++        }
++    }
++
++    fn connect(&self) -> KResult<()> {
++        // A real MCU runs these while building its config
++        let callbacks = self.config_callbacks.borrow().clone();
++        for cb in callbacks {
++            cb()?;
++        }
++        Ok(())
++    }
++
++    fn handle_ack(&self, data: &[Val]) -> KResult<()> {
++        let int = |v: Option<&Val>| match v {
++            Some(Val::Int(i)) => *i,
++            _ => 0,
++        };
++        let (oid, count) = (int(data.first()), int(data.get(1)));
++        if let Some(g) = self.groups.borrow_mut().get_mut(&oid) {
++            g.ack += count;
++        }
++        Ok(())
++    }
++
++    // Serial port handling
++    fn open(&self) -> bool {
++        let ser = match Uart::open(&self.serial_port, self.baud as u32, Some(true), None) {
++            Ok(ser) => ser,
++            Err(e) => {
++                let msg = e.message().to_string();
++                if self.open_error.borrow().as_deref() != Some(msg.as_str()) {
++                    logging::warning(&format!(
++                        "canvas_filament_sensor: unable to open {}: {}",
++                        self.serial_port, msg
++                    ));
++                    *self.open_error.borrow_mut() = Some(msg);
++                }
++                return false;
++            }
++        };
++        *self.open_error.borrow_mut() = None;
++        *self.parser.borrow_mut() = FrameParser::default();
++        let w = self.me.clone();
++        *self.fd_handle.borrow_mut() = Some(self.reactor.register_fd(
++            ser.fd(),
++            Box::new(move |eventtime| {
++                if let Some(s) = w.upgrade() {
++                    s.handle_read(eventtime);
++                }
++            }),
++            None,
++        ));
++        *self.ser.borrow_mut() = Some(ser);
++        logging::info(&format!("canvas_filament_sensor: opened {}", self.serial_port));
++        true
++    }
++
++    fn close(&self) {
++        if let Some(h) = self.fd_handle.borrow_mut().take() {
++            self.reactor.unregister_fd(&h);
++        }
++        // (the port closes when the Uart drops)
++        self.ser.borrow_mut().take();
++    }
++
++    fn io_error(&self, eventtime: f64, err: &str) {
++        logging::warning(&format!("canvas_filament_sensor: {} error: {}", self.serial_port, err));
++        self.close();
++        self.set_disconnected(eventtime);
++    }
++
++    // Polling
++    fn poll_event(&self, eventtime: f64) -> f64 {
++        if self.ser.borrow().is_none() && !self.open() {
++            return eventtime + RETRY_TIME;
++        }
++        if self.awaiting_reply.get() {
++            self.missed.set(self.missed.get() + 1);
++            if self.missed.get() >= self.max_missed {
++                self.set_disconnected(eventtime);
++            }
++        }
++        let mut cmd = CMD_STATUS;
++        if self.want_version.get() {
++            cmd = CMD_VERSION;
++            self.want_version.set(false);
++        }
++        let res = match self.ser.borrow().as_ref() {
++            Some(ser) => ser.write_checked(&build_frame(&[self.device_id as u8, cmd])),
++            None => Ok(()),
++        };
++        if let Err(e) = res {
++            self.io_error(eventtime, &e);
++            return eventtime + RETRY_TIME;
++        }
++        self.awaiting_reply.set(true);
++        eventtime + self.poll_interval
++    }
++
++    fn handle_read(&self, eventtime: f64) {
++        let Some(fd) = self.ser.borrow().as_ref().map(|s| s.fd()) else { return };
++        let mut buf = [0u8; 4096];
++        // SAFETY: buf is a live buffer of buf.len() bytes; fd is the open port's
++        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
++        if n < 0 {
++            let e = std::io::Error::last_os_error();
++            self.io_error(eventtime, &crate::pyfmt::py_oserror(&e, &self.serial_port));
++            return;
++        }
++        let payloads = self.parser.borrow_mut().feed(&buf[..n as usize]);
++        for payload in payloads {
++            self.process_payload(eventtime, &payload);
++        }
++    }
++
++    fn process_payload(&self, eventtime: f64, payload: &[u8]) {
++        if payload.len() < 2 || payload[0] as i64 != self.device_id {
++            return;
++        }
++        let (cmd, data) = (payload[1], &payload[2..]);
++        self.awaiting_reply.set(false);
++        self.missed.set(0);
++        if cmd == CMD_VERSION {
++            // (bytes.decode("ascii", "replace"))
++            let version: String = data.iter().map(|&b| if b < 0x80 { b as char } else { '\u{FFFD}' }).collect();
++            logging::info(&format!("canvas_filament_sensor: version {}", version));
++            *self.version.borrow_mut() = Some(version);
++        } else if cmd == CMD_STATUS && data.len() == 6 {
++            if !self.connected.get() {
++                self.connected.set(true);
++                self.want_version.set(true);
++                logging::info("canvas_filament_sensor: sensor connected");
++            }
++            let present = data[0] != 0;
++            let edges = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
++            self.present.set(Some(present));
++            self.edges.set(Some(edges));
++            self.update_pins(eventtime, Some((present, edges)));
++        }
++    }
++
++    fn set_disconnected(&self, eventtime: f64) {
++        self.awaiting_reply.set(false);
++        self.missed.set(0);
++        if !self.connected.get() {
++            return;
++        }
++        self.connected.set(false);
++        *self.version.borrow_mut() = None;
++        logging::warning("canvas_filament_sensor: sensor lost");
++        self.update_pins(eventtime, None);
++    }
++
++    // Pin updates
++    fn update_pins(&self, eventtime: f64, reading: Option<(bool, u32)>) {
++        let mut levels = self.levels.get();
++        match reading {
++            None => {
++                // Disconnected: the pins keep their last level unless asked
++                self.last_edges.set(None);
++                if self.runout_on_disconnect {
++                    levels[0] = 0;
++                }
++            }
++            Some((present, edges)) => {
++                levels[0] = present as i64;
++                if let Some(last) = self.last_edges.get() {
++                    let delta = edges.wrapping_sub(last) & EDGE_MASK;
++                    // ignore a sensor restart (count went back)
++                    if delta != 0 && delta <= EDGE_MASK / 2 {
++                        levels[1] ^= 1;
++                    }
++                }
++                self.last_edges.set(Some(edges));
++            }
++        }
++        self.levels.set(levels);
++        let mut calls = vec![];
++        for (oid, group) in self.groups.borrow_mut().iter_mut() {
++            let Some(handler) = group.handler.clone() else { continue };
++            // Raw levels; McuButtons applies the invert mask itself
++            let state = group.pins.iter().enumerate().fold(0, |st, (i, &p)| st | (levels[p] << i));
++            if Some(state) == group.last {
++                continue;
++            }
++            group.last = Some(state);
++            let mut params = Params::default();
++            params.insert("oid".into(), Val::Int(*oid));
++            params.insert("ack_count".into(), Val::Int(group.ack & 0xFF));
++            params.insert("state".into(), Val::Bytes(vec![state as u8]));
++            params.insert("#receive_time".into(), Val::Float(eventtime));
++            calls.push((handler, params));
++        }
++        // (the handlers run with the groups released: they ack back)
++        for (handler, params) in calls {
++            if let Err(e) = handler(&params) {
++                // (python: the exception escapes the reactor's fd callback)
++                self.printer.unhandled_exception(&e);
++            }
++        }
++    }
++}
++
++impl PinChip for CanvasFilamentSensor {
++    fn setup_pin(&self, _pin_type: &str, _pin_params: &SharedPinParams) -> Result<Rc<dyn Any>, String> {
++        Err(format!("{} pins can only be used as button inputs", self.chip_name))
++    }
++    fn buttons_host(&self) -> Option<Rc<dyn ButtonsHost>> {
++        self.me.upgrade().map(|s| s as Rc<dyn ButtonsHost>)
++    }
++}
++
++/// The subset of the MCU interface used by buttons' McuButtons
++impl ButtonsHost for CanvasFilamentSensor {
++    fn register_config_callback(&self, cb: Rc<dyn Fn() -> KResult<()>>) {
++        self.config_callbacks.borrow_mut().push(cb);
++    }
++    fn create_oid(&self) -> i64 {
++        let oid = self.next_oid.get();
++        self.next_oid.set(oid + 1);
++        // "last": None so the first update is always sent and McuButtons
++        // sees the initial level of inverted pins
++        self.groups.borrow_mut().insert(oid, Group { pins: vec![], handler: None, ack: 0, last: None });
++        oid
++    }
++    fn add_config_cmd(&self, cmd: &str, _is_init: bool, _on_restart: bool) -> KResult<()> {
++        // Only "buttons_add oid=%d pos=%d pin=%s pull_up=%d" matters
++        let mut parts = cmd.split_whitespace();
++        if parts.next() != Some("buttons_add") {
++            return Ok(());
++        }
++        let args: IndexMap<&str, &str> = parts.filter_map(|p| p.split_once('=')).collect();
++        let pin = args.get("pin").copied().unwrap_or_default();
++        let Some(index) = PINS.iter().position(|p| *p == pin) else {
++            return Err(KError::Pins(format!("unknown pin {}:{} (use {})", self.chip_name, pin, PINS.join(", "))));
++        };
++        let oid: i64 = args.get("oid").and_then(|o| o.parse().ok()).unwrap_or_default();
++        if let Some(g) = self.groups.borrow_mut().get_mut(&oid) {
++            g.pins.push(index);
++        }
++        Ok(())
++    }
++    fn alloc_command_queue(&self) -> Option<CommandQueue> {
++        None
++    }
++    fn lookup_command(&self, _msgformat: &str, _cq: Option<CommandQueue>) -> KResult<ButtonsCommand> {
++        // Only "buttons_ack oid=%c count=%c"
++        let w = self.me.clone();
++        Ok(Rc::new(move |data| match w.upgrade() {
++            Some(s) => s.handle_ack(data),
++            None => Ok(()),
++        }))
++    }
++    fn get_query_slot(&self, _oid: i64) -> i64 {
++        0
++    }
++    fn seconds_to_clock(&self, _time: f64) -> i64 {
++        0
++    }
++    fn register_response(&self, cb: Rc<dyn Fn(&Params) -> KResult<()>>, _msg: &str, oid: i64) {
++        if let Some(g) = self.groups.borrow_mut().get_mut(&oid) {
++            g.handler = Some(cb);
++        }
++    }
++}
++
++impl PrinterObject for CanvasFilamentSensor {
++    fn has_status(&self) -> bool {
++        true
++    }
++    fn get_status(&self, _eventtime: f64) -> Option<PyVal> {
++        let opt_bool = |v: Option<bool>| v.map(PyVal::Bool).unwrap_or(PyVal::None);
++        let levels = self.levels.get();
++        Some(PyVal::Dict(crate::pydict! {
++            "connected" => PyVal::Bool(self.connected.get()),
++            "version" => self.version.borrow().clone().map(PyVal::Str).unwrap_or(PyVal::None),
++            "filament_present" => opt_bool(self.present.get()),
++            "edges" => self.edges.get().map(|e| PyVal::Int(e as i64)).unwrap_or(PyVal::None),
++            "crc_errors" => PyVal::Int(self.parser.borrow().errors),
++            "pins" => PyVal::Dict(crate::pydict! { "filament" => PyVal::Int(levels[0]), "encoder" => PyVal::Int(levels[1]) }),
++        }))
++    }
++    fn teardown(&self) {
++        self.close();
++    }
++}
++
++pub fn load_config(config: &ConfigWrapper) -> KResult<PObj> {
++    Ok(CanvasFilamentSensor::new(config)?)
++}
+diff --git a/src/extras/mod.rs b/src/extras/mod.rs
+index 4a2aa55..e04429b 100644
+--- a/src/extras/mod.rs
++++ b/src/extras/mod.rs
+@@ -27,6 +27,8 @@ pub mod bus;
+ pub mod buttons;
+ pub mod canbus_ids;
+ pub mod canbus_stats;
++// COSMOS (Rusticc)
++pub mod canvas_filament_sensor;
+ pub mod control_mpc;
+ pub mod controller_fan;
+ pub mod dac084s085;
+@@ -182,6 +184,7 @@ pub static MODULES: &[PrinterModule] = &[
+     PrinterModule { name: "buttons", ported: true, load_config: Some(buttons::load_config), load_config_prefix: None, register_components: None },
+     PrinterModule { name: "canbus_ids", ported: true, load_config: Some(canbus_ids::load_config), load_config_prefix: None, register_components: None },
+     PrinterModule { name: "canbus_stats", ported: true, load_config: None, load_config_prefix: Some(canbus_stats::load_config_prefix), register_components: None },
++    PrinterModule { name: "canvas_filament_sensor", ported: true, load_config: Some(canvas_filament_sensor::load_config), load_config_prefix: None, register_components: None },
+     PrinterModule { name: "control_mpc", ported: true, load_config: None, load_config_prefix: None, register_components: None },
+     PrinterModule { name: "controller_fan", ported: true, load_config: None, load_config_prefix: Some(controller_fan::load_config_prefix), register_components: None },
+     PrinterModule { name: "dac084S085", ported: true, load_config: None, load_config_prefix: Some(dac084s085::load_config_prefix), register_components: None },
+diff --git a/src/pins.rs b/src/pins.rs
+index be75ed1..8af0061 100644
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -45,6 +45,11 @@ pub trait PinChip {
+     fn python_object(&self) -> Option<Rc<dyn Any>> {
+         None
+     }
++    /// a chip that answers MCU_buttons' MCU calls itself (None: its
++    /// buttons go through its MCU)
++    fn buttons_host(&self) -> Option<Rc<dyn crate::extras::buttons::ButtonsHost>> {
++        None
++    }
+ }
+ 
+ /// The pin_params dict. Shared: lookup_pin() hands the same object to every
+diff --git a/src/serialhdl.rs b/src/serialhdl.rs
+index 186277d..dccf949 100644
+--- a/src/serialhdl.rs
++++ b/src/serialhdl.rs
+@@ -782,6 +782,11 @@ fn custom_baud_error(baud: u32) -> KError {
+ }
+ 
+ impl Uart {
++    /// ser.fileno()
++    pub fn fd(&self) -> RawFd {
++        self.fd
++    }
++
+     /// pyserial Serial(baudrate=baud, timeout=0, exclusive=...) + port +
+     /// rts + open(); dtr is asserted on open like pyserial
+     pub fn open(port: &str, baud: u32, exclusive: Option<bool>, rts: Option<bool>) -> KResult<Uart> {

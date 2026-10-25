@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 13:35:34 +0200
+Subject: [PATCH 18/20] rusticc: errors reach the flash at once (log fdatasync
+ after ERROR lines)
+
+A shutdown's cause was lost when the printer was power-cycled right after
+it: the log lines were still in the page cache. After a line at ERROR or
+above ("Transition to shutdown state", exceptions) the background logger
+syncs the log file; everything before it, the MCU's shutdown message
+included, is then on the flash. Nothing else changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
+---
+ src/queuelogger.rs | 27 ++++++++++++++++++++-------
+ 1 file changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/src/queuelogger.rs b/src/queuelogger.rs
+index d6a0628..d2bc26d 100644
+--- a/src/queuelogger.rs
++++ b/src/queuelogger.rs
+@@ -262,6 +262,13 @@ impl SizeRotatingFile {
+             let _ = f.flush();
+         }
+     }
++
++    /// the log written so far on the flash (fdatasync)
++    fn sync(&mut self) {
++        if let Some(f) = self.stream.as_mut() {
++            let _ = f.sync_data();
++        }
++    }
+ }
+ 
+ struct Inner {
+@@ -290,7 +297,7 @@ impl Inner {
+ /// QueueListener: writes log records from a background thread
+ pub struct QueueListener {
+     inner: Arc<Mutex<Inner>>,
+-    tx: mpsc::Sender<Option<String>>,
++    tx: mpsc::Sender<Option<(String, bool)>>,
+     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+ }
+ 
+@@ -299,11 +306,15 @@ impl QueueListener {
+     pub fn new(filename: &str, _rotate_log_at_restart: bool) -> std::io::Result<Self> {
+         let file = SizeRotatingFile::new(filename, 5 * 1024 * 1024, 2)?;
+         let inner = Arc::new(Mutex::new(Inner { file, rollover_info: BTreeMap::new() }));
+-        let (tx, rx) = mpsc::channel::<Option<String>>();
++        let (tx, rx) = mpsc::channel::<Option<(String, bool)>>();
+         let i = inner.clone();
+         let thread = std::thread::spawn(move || {
+-            while let Ok(Some(msg)) = rx.recv() {
+-                i.lock().unwrap().emit(&msg);
++            while let Ok(Some((msg, sync))) = rx.recv() {
++                let mut i = i.lock().unwrap();
++                i.emit(&msg);
++                if sync {
++                    i.file.sync();
++                }
+             }
+         });
+         Ok(QueueListener { inner, tx, thread: Mutex::new(Some(thread)) })
+@@ -336,7 +347,7 @@ impl QueueListener {
+         self.inner.lock().unwrap().do_rollover();
+     }
+ 
+-    fn sender(&self) -> mpsc::Sender<Option<String>> {
++    fn sender(&self) -> mpsc::Sender<Option<(String, bool)>> {
+         self.tx.clone()
+     }
+ }
+@@ -346,8 +357,10 @@ pub fn setup_bg_logging(filename: &str, debuglevel: i32, rotate_log_at_restart:
+     let ql = QueueListener::new(filename, rotate_log_at_restart)?;
+     // QueueHandler: the formatted message ("%(message)s") goes to the queue
+     let tx = Mutex::new(ql.sender());
+-    logging::set_handler(Some(Box::new(move |_level, msg| {
+-        let _ = tx.lock().unwrap().send(Some(msg.to_string()));
++    // (Rusticc: an error is on the flash at once, so a power cycle after a
++    // shutdown keeps its cause; python's logging leaves it in the page cache)
++    logging::set_handler(Some(Box::new(move |level, msg| {
++        let _ = tx.lock().unwrap().send(Some((msg.to_string(), level >= logging::ERROR)));
+     })));
+     logging::set_level(debuglevel);
+     Ok(ql)

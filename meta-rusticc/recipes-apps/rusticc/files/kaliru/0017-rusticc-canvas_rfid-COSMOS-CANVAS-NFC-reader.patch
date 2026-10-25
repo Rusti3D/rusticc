@@ -1,0 +1,630 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 13:19:35 +0200
+Subject: [PATCH 17/20] rusticc: canvas_rfid (COSMOS, CANVAS NFC reader)
+
+The reader's i2c protocol, tag reads and commands in Rust; the tags are decoded by
+OpenRFID's processors on the plugins' CPython (imported from openrfid_path, as
+COSMOS does). Needs the plugins feature.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
+---
+ src/extras/canvas_rfid.rs | 584 ++++++++++++++++++++++++++++++++++++++
+ src/extras/mod.rs         |   5 +
+ 2 files changed, 589 insertions(+)
+ create mode 100644 src/extras/canvas_rfid.rs
+
+diff --git a/src/extras/canvas_rfid.rs b/src/extras/canvas_rfid.rs
+new file mode 100644
+index 0000000..6bf9083
+--- /dev/null
++++ b/src/extras/canvas_rfid.rs
+@@ -0,0 +1,584 @@
++// Elegoo Canvas RFID module (port of COSMOS's klippy/extras/canvas_rfid.py)
++//
++// Copyright (C) 2026  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++//
++// The reader is an MCU-fronted MFRC522-class NFC-A module on I2C address 0x50,
++// bit-banged from the Canvas MCU. It reads NTAG21x tags only. Tag contents are
++// decoded with the OpenRFID tag processors
++// (https://github.com/suchmememanyskill/OpenRFID), a python library: they run
++// on the plugins' CPython, imported from its tree as COSMOS does.
++//
++//   request: A0 . 00 . seq . CLASS . CMD . len16 . data . XOR(CLASS..data)
++//   reply:   A0 . 00 . seq . CLASS . STATUS . len16 . data . check byte
++//
++// Unimplemented or not-yet-processed commands are answered with a copy of the
++// request, so replies are read after a fixed delay and echoes are retried.
++use crate::configfile::{ConfigWrapper, Lim};
++use crate::error::{KError, KResult};
++use crate::extras::bus::{mcu_i2c_from_config, McuI2c};
++use crate::extras::gcode_macro::{create_template_context, load_gcode_macro, Template};
++use crate::extras::print_stats::PrintStats;
++use crate::gcode::{GCodeCommand, GCodeDispatch};
++use crate::jinja::value::Value;
++use crate::logging;
++use crate::msgproto::Val;
++use crate::plugins::py::{self, PyRef};
++use crate::printer::{PObj, Printer, PrinterObject};
++use crate::pyval::{PyDict, PyVal};
++use crate::reactor::{Reactor, ReactorMutex, Timer, NEVER, NOW};
++use std::cell::{Cell, RefCell};
++use std::rc::Rc;
++
++const FRAME_ADDR: u8 = 0xA0;
++const CLS_MODULE: u8 = 0x01;
++const CLS_NTAG: u8 = 0x03;
++const CMD_MODULE_INFO: u8 = 0x01;
++const CMD_HOT_START: u8 = 0x03;
++const CMD_TAG_ID: u8 = 0x06;
++const CMD_IDENTIFY_PAGE: u8 = 0x09;
++const CMD_MULTI_PAGE_READ: u8 = 0x06;
++const STATUS_OK: u8 = 0x00;
++const REPLY_OVERHEAD: usize = 8; // 7 header bytes + XOR
++// 11 pages = 52-byte reply, the most that fits in one i2c_read_response
++const MAX_READ_PAGES: i64 = 11;
++// Physical page count (incl. header and config pages) by CC size byte
++const PAGE_COUNTS_BY_CC_SIZE: [(u8, i64); 4] = [
++    (0x06, 16),  // MIFARE Ultralight
++    (0x12, 45),  // NTAG213
++    (0x3E, 135), // NTAG215
++    (0x6D, 231), // NTAG216
++];
++// NTAG213 incl. config pages, used when the capability container is unknown
++const DEFAULT_LAST_PAGE: i64 = 44;
++const READ_RETRY_TIME: f64 = 5.0;
++const ELEGOO_MAGIC: [u8; 4] = [0x36, 0xEE, 0xEE, 0xEE];
++
++// OpenRFID processors for tags this module can read (NTAG / Ultralight)
++const PROCESSORS: [(&str, &str, &str); 6] = [
++    ("elegoo", "tag.elegoo.processor", "ElegooTagProcessor"),
++    ("tigertag", "tag.tigertag.processor", "TigerTagProcessor"),
++    ("openspool", "tag.openspool.processor", "OpenspoolTagProcessor"),
++    ("opentag3d", "tag.opentag3d.processor", "OpenTag3DTagProcessor"),
++    ("spoolease", "tag.spoolease.processor", "SpooleaseTagProcessor"),
++    ("anycubic", "tag.anycubic.processor", "AnycubicTagProcessor"),
++];
++
++fn xor8(data: &[u8]) -> u8 {
++    data.iter().fold(0, |c, b| c ^ b)
++}
++
++fn build_frame(cls: u8, cmd: u8, data: &[u8], seq: u8) -> Vec<u8> {
++    let mut body = vec![cls, cmd, (data.len() >> 8) as u8, data.len() as u8];
++    body.extend_from_slice(data);
++    let mut frame = vec![FRAME_ADDR, 0, seq];
++    frame.extend_from_slice(&body);
++    frame.push(xor8(&body));
++    frame
++}
++
++/// (status, data), or None if the reply is an echo of the request (not
++/// processed yet), a stale reply to another command, or fails its checks
++fn parse_reply(frame: &[u8], rx: &[u8]) -> Option<(u8, Vec<u8>)> {
++    if rx.len() < REPLY_OVERHEAD || rx[..frame.len().min(rx.len())] == *frame {
++        return None;
++    }
++    let n = ((rx[5] as usize) << 8) | rx[6] as usize;
++    if rx[0] != FRAME_ADDR || rx[3] != frame[3] {
++        return None;
++    }
++    if rx.len() < n + REPLY_OVERHEAD {
++        return None;
++    }
++    Some((rx[4], rx[7..7 + n].to_vec()))
++}
++
++fn tag_last_page(head: &[u8]) -> i64 {
++    // Capability container (page 3): E1 . version . NDEF area size / 8 . access.
++    // The NDEF area can be smaller than the user memory (NTAG215/216), so map
++    // the factory CC size to the chip's physical page count, as OpenRFID does
++    let cc = head.get(12..16).unwrap_or(&[]);
++    if cc.len() == 4 && cc[0] == 0xE1 {
++        if let Some((_, pages)) = PAGE_COUNTS_BY_CC_SIZE.iter().find(|(size, _)| *size == cc[2]) {
++            return pages - 1;
++        }
++    }
++    DEFAULT_LAST_PAGE
++}
++
++/// bytes(data) as a python object
++fn py_bytes(data: &[u8]) -> KResult<PyRef> {
++    let items: Vec<PyRef> = data.iter().map(|b| py::py_int(*b as i64)).collect();
++    py::lookup("builtins", "bytes")?.call(&[&py::py_list(items)])
++}
++
++/// The OpenRFID tag processors, imported from an OpenRFID src tree
++struct OpenRfid {
++    scan_result: PyRef,
++    ultralight: PyRef,
++    processors: Vec<PyRef>,
++}
++
++impl OpenRfid {
++    fn new(path: &str, names: &[String]) -> KResult<OpenRfid> {
++        crate::plugins::ensure_started()?;
++        let sys_path = py::lookup("sys", "path")?;
++        if !sys_path.call_method("__contains__", &[&py::py_str(path)])?.is_true()? {
++            sys_path.call_method("append", &[&py::py_str(path)])?;
++        }
++        let scan_result = py::import("reader.scan_result")?.getattr("ScanResult")?;
++        let ultralight = py::import("tag.tag_types")?.getattr("TagType")?.getattr("MifareUltralight")?;
++        let mut processors = vec![];
++        for name in names {
++            let (_, module, cls) = PROCESSORS.iter().find(|(n, _, _)| n == name).expect("checked in CanvasRfid::new");
++            let proc = py::import(module)?.getattr(cls)?;
++            let mut arg = PyDict::default();
++            arg.insert("__name".into(), PyVal::Str(name.clone()));
++            processors.push(proc.call(&[&py::from_pyval(&PyVal::Dict(arg))])?);
++        }
++        Ok(OpenRfid { scan_result, ultralight, processors })
++    }
++
++    /// the filament dict of the first processor that recognises the tag
++    fn identify(&self, uid: &str, data: &[u8]) -> KResult<Option<PyVal>> {
++        let fromhex = py::lookup("builtins", "bytes")?.getattr("fromhex")?;
++        let scan = self.scan_result.call(&[
++            &self.ultralight,
++            &fromhex.call(&[&py::py_str(uid)])?,
++            &py_bytes(&[0x00, 0x44])?,
++            &py_bytes(&[])?,
++            &py_bytes(&[0x00])?,
++        ])?;
++        let data = py_bytes(data)?;
++        for proc in &self.processors {
++            let filament = match proc.call_method("process_tag", &[&scan, &data]) {
++                Ok(f) => f,
++                Err(e) => {
++                    let name = proc.getattr("name").and_then(|n| n.str()).unwrap_or_default();
++                    logging::info(&format!("canvas_rfid: {} processor: {}", name, e.message()));
++                    continue;
++                }
++            };
++            if filament.is_none() {
++                continue;
++            }
++            let mut result = py::to_pyval(&filament.call_method("to_dict", &[])?)?;
++            if let PyVal::Dict(d) = &mut result {
++                let rgb = d.get("rgb").and_then(|v| v.as_i64()).unwrap_or(0);
++                d.insert("color_hex".into(), PyVal::Str(format!("{:06X}", rgb)));
++            }
++            return Ok(Some(result));
++        }
++        Ok(None)
++    }
++}
++
++pub struct CanvasRfid {
++    printer: Rc<Printer>,
++    reactor: Rc<Reactor>,
++    name: String,
++    i2c: Rc<McuI2c>,
++    use_seq: bool,
++    init_module: bool,
++    poll_interval: f64,
++    poll_while_printing: bool,
++    reply_delay: f64,
++    retries: i64,
++    max_pages: i64,
++    openrfid: OpenRfid,
++    tag_gcode: Option<Rc<Template>>,
++    seq: Cell<u8>,
++    lock: Rc<ReactorMutex>,
++    initialized: Cell<bool>,
++    version: RefCell<Option<String>>,
++    print_stats: RefCell<Option<Rc<PrintStats>>>,
++    failed_uid: RefCell<Option<String>>,
++    failed_until: Cell<f64>,
++    uid: RefCell<Option<String>>,
++    /// Result of the last tag read; kept after the tag is removed
++    filament: RefCell<Option<PyVal>>,
++    scan_id: Cell<i64>,
++    scan_time: Cell<f64>,
++    errors: Cell<i64>,
++    poll_timer: RefCell<Option<Timer>>,
++}
++
++const CMD_QUERY_CANVAS_RFID_HELP: &str = "Report the spool tag on a Canvas RFID reader";
++const CMD_CANVAS_RFID_DUMP_HELP: &str = "Dump the pages of the tag on a Canvas reader";
++
++impl CanvasRfid {
++    fn new(config: &ConfigWrapper) -> KResult<Rc<Self>> {
++        let printer = config.get_printer();
++        let reactor = printer.get_reactor();
++        let name = config.get_name().split_whitespace().last().unwrap_or_default().to_string();
++        let i2c = mcu_i2c_from_config(config, Some(0x50), 100000)?;
++        let variant = config.getchoice("variant", &[("cc1", "cc1"), ("cc2", "cc2")], "cc1")?;
++        // This command filter all tags to a specific manufacturer which we don't
++        // want to do
++        let init_module = config.getboolean("init_module", false)?;
++        let poll_interval = config.getfloat("poll_interval", 1.0, Lim::new().min(0.2))?;
++        let poll_while_printing = config.getboolean("poll_while_printing", false)?;
++        let reply_delay = config.getfloat("reply_delay", 0.05, Lim::new().min(0.01).max(1.0))?;
++        let retries = config.getint("retries", 3, Lim::new().min(0))?;
++        let max_pages = config.getint("max_pages", 231, Lim::new().min(MAX_READ_PAGES).max(256))?;
++        let default_names = PyVal::List(PROCESSORS.iter().map(|(n, _, _)| PyVal::from(*n)).collect());
++        let names = config.getlist("openrfid_processors", default_names, ",", None)?.unwrap_or_default();
++        for n in &names {
++            if !PROCESSORS.iter().any(|(p, _, _)| p == n) {
++                return Err(KError::config(format!("canvas_rfid: unknown openrfid processor '{}'", n)));
++            }
++        }
++        let path = config.get("openrfid_path", "/usr/share/openrfid")?;
++        let openrfid = OpenRfid::new(&path, &names)
++            // (python raises the config error inside the except: the import
++            // error is its __context__)
++            .map_err(|e| KError::config(format!("canvas_rfid: cannot load OpenRFID from {}: {}", path, e.message())).with_context(e))?;
++        let gcode_macro = load_gcode_macro(config)?;
++        let tag_gcode = match config.get_opt("tag_gcode")? {
++            Some(_) => Some(gcode_macro.load_template(config, "tag_gcode", None)?),
++            None => None,
++        };
++        let r = Rc::new(CanvasRfid {
++            printer: printer.clone(),
++            reactor: reactor.clone(),
++            name: name.clone(),
++            i2c,
++            use_seq: variant == "cc1",
++            init_module,
++            poll_interval,
++            poll_while_printing,
++            reply_delay,
++            retries,
++            max_pages,
++            openrfid,
++            tag_gcode,
++            seq: Cell::new(0),
++            lock: reactor.mutex(false),
++            initialized: Cell::new(false),
++            version: RefCell::new(None),
++            print_stats: RefCell::new(None),
++            failed_uid: RefCell::new(None),
++            failed_until: Cell::new(0.0),
++            uid: RefCell::new(None),
++            filament: RefCell::new(None),
++            scan_id: Cell::new(0),
++            scan_time: Cell::new(0.0),
++            errors: Cell::new(0),
++            poll_timer: RefCell::new(None),
++        });
++        let w = Rc::downgrade(&r);
++        *r.poll_timer.borrow_mut() = Some(reactor.register_timer(
++            Box::new(move |eventtime| match w.upgrade() {
++                Some(r) => r.poll_event(eventtime),
++                None => NEVER,
++            }),
++            NEVER,
++        ));
++        let rr = r.clone();
++        crate::events::KlippyReady::on(&printer, move || {
++            *rr.print_stats.borrow_mut() = rr.printer.lookup::<PrintStats>("print_stats").ok();
++            if let Some(t) = rr.poll_timer.borrow().as_ref() {
++                rr.reactor.update_timer(t, NOW);
++            }
++            Ok(())
++        });
++        let gcode = printer.lookup::<GCodeDispatch>("gcode")?;
++        let rr = r.clone();
++        gcode.register_mux_command(
++            "QUERY_CANVAS_RFID",
++            "RFID",
++            Some(&name),
++            Rc::new(move |g| rr.cmd_query_canvas_rfid(g)),
++            Some(CMD_QUERY_CANVAS_RFID_HELP),
++        )?;
++        let rr = r.clone();
++        gcode.register_mux_command(
++            "CANVAS_RFID_DUMP",
++            "RFID",
++            Some(&name),
++            Rc::new(move |g| rr.cmd_canvas_rfid_dump(g)),
++            Some(CMD_CANVAS_RFID_DUMP_HELP),
++        )?;
++        Ok(r)
++    }
++
++    // Low-level transaction
++    fn transact(&self, cls: u8, cmd: u8, data: &[u8], rxlen: usize) -> KResult<Option<(u8, Vec<u8>)>> {
++        let mut seq = 0;
++        if self.use_seq {
++            seq = self.seq.get();
++            self.seq.set(seq.wrapping_add(1));
++        }
++        let frame = build_frame(cls, cmd, data, seq);
++        self.lock.lock()?;
++        let res = (|| -> KResult<Option<(u8, Vec<u8>)>> {
++            self.i2c.i2c_write(&frame[1..], 0, 0)?; // the MCU sends the address byte
++            for _ in 0..=self.retries {
++                self.reactor.pause(self.reactor.monotonic() + self.reply_delay)?;
++                let params = self.i2c.i2c_read(&[], rxlen as i64, true)?;
++                let rx = match params.get("response") {
++                    Some(Val::Bytes(b)) => b.clone(),
++                    _ => vec![],
++                };
++                if let Some(reply) = parse_reply(&frame, &rx) {
++                    return Ok(Some(reply));
++                }
++            }
++            Ok(None)
++        })();
++        self.lock.unlock();
++        let reply = res?;
++        if reply.is_none() {
++            self.errors.set(self.errors.get() + 1);
++        }
++        Ok(reply)
++    }
++
++    fn read_pages(&self, start: i64, end: i64) -> KResult<Option<Vec<u8>>> {
++        let mut data = vec![];
++        let mut first = start;
++        while first <= end {
++            let last = (first + MAX_READ_PAGES - 1).min(end);
++            let n = (last - first + 1) as usize;
++            let reply = self.transact(CLS_NTAG, CMD_MULTI_PAGE_READ, &[first as u8, last as u8], 4 * n + REPLY_OVERHEAD)?;
++            match reply {
++                Some((STATUS_OK, d)) if d.len() == 4 * n => data.extend_from_slice(&d),
++                _ => return Ok(None),
++            }
++            first += MAX_READ_PAGES;
++        }
++        Ok(Some(data))
++    }
++
++    fn read_tag(&self) -> KResult<Option<Vec<u8>>> {
++        // Pages 0-10 hold the capability container, which gives the tag size
++        let Some(head) = self.read_pages(0, MAX_READ_PAGES - 1)? else { return Ok(None) };
++        let last = tag_last_page(&head).min(self.max_pages - 1);
++        if last < MAX_READ_PAGES {
++            return Ok(Some(head[..(4 * (last + 1) as usize).min(head.len())].to_vec()));
++        }
++        let Some(rest) = self.read_pages(MAX_READ_PAGES, last)? else { return Ok(None) };
++        Ok(Some([head, rest].concat()))
++    }
++
++    fn init_module(&self) -> KResult<()> {
++        // What the stock cc1 firmware sends at boot: hot start, then only
++        // report tags whose page 16 starts with the Elegoo magic
++        self.transact(CLS_MODULE, CMD_HOT_START, &[], 8)?;
++        let mut ident = vec![0x00, 0x10];
++        ident.extend_from_slice(&ELEGOO_MAGIC);
++        self.transact(CLS_MODULE, CMD_IDENTIFY_PAGE, &ident, 8)?;
++        Ok(())
++    }
++
++    fn read_module_info(&self) -> KResult<()> {
++        // "HW version SW version release date", e.g. "EF-A5-V1.0.072 V1.01 20250625"
++        match self.transact(CLS_MODULE, CMD_MODULE_INFO, &[], 40)? {
++            Some((STATUS_OK, data)) => {
++                // (bytes.decode("ascii", "replace").strip())
++                let s: String = data.iter().map(|&b| if b < 0x80 { b as char } else { '\u{FFFD}' }).collect();
++                let version = crate::pyfmt::py_strip(&s).to_string();
++                logging::info(&format!("canvas_rfid {}: module {}", self.name, version));
++                *self.version.borrow_mut() = Some(version);
++            }
++            _ => logging::warning(&format!("canvas_rfid {}: no module info reply", self.name)),
++        }
++        Ok(())
++    }
++
++    fn poll_event(self: &Rc<Self>, eventtime: f64) -> f64 {
++        match self.poll(eventtime) {
++            Ok(t) => t,
++            Err(e) => {
++                // (python: the exception escapes the reactor timer)
++                self.printer.unhandled_exception(&e);
++                NEVER
++            }
++        }
++    }
++
++    fn poll(self: &Rc<Self>, eventtime: f64) -> KResult<f64> {
++        let next = eventtime + self.poll_interval;
++        if !self.poll_while_printing {
++            if let Some(ps) = self.print_stats.borrow().as_ref() {
++                if *ps.state.borrow() == "printing" {
++                    return Ok(next);
++                }
++            }
++        }
++        if !self.initialized.get() {
++            self.read_module_info()?;
++            if self.init_module {
++                self.init_module()?;
++            }
++            self.initialized.set(true);
++        }
++        let Some((status, data)) = self.transact(CLS_MODULE, CMD_TAG_ID, &[], 16)? else { return Ok(next) };
++        // data = [uid length, uid...]
++        if status != STATUS_OK || data.is_empty() || data[0] as usize != data.len() - 1 {
++            if self.uid.borrow().is_some() {
++                self.respond("tag removed");
++                *self.uid.borrow_mut() = None;
++                self.send_tag_event(PyVal::None, PyVal::None)?;
++            }
++            return Ok(next);
++        }
++        let uid: String = data[1..].iter().map(|b| format!("{:02X}", b)).collect();
++        if self.uid.borrow().as_deref() == Some(uid.as_str()) {
++            return Ok(next);
++        }
++        if self.failed_uid.borrow().as_deref() == Some(uid.as_str()) && eventtime < self.failed_until.get() {
++            return Ok(next);
++        }
++        let Some(pages) = self.read_tag()? else {
++            // e.g. MIFARE Classic, or a tag at the edge of the field
++            if self.failed_uid.borrow().as_deref() != Some(uid.as_str()) {
++                self.respond(&format!("tag {} not readable (not NTAG?)", uid));
++            }
++            *self.failed_uid.borrow_mut() = Some(uid);
++            self.failed_until.set(eventtime + READ_RETRY_TIME);
++            return Ok(next);
++        };
++        *self.uid.borrow_mut() = Some(uid.clone());
++        let filament = self.openrfid.identify(&uid, &pages)?;
++        *self.filament.borrow_mut() = filament.clone();
++        match &filament {
++            None => self.respond(&format!("tag {}: unrecognised tag", uid)),
++            Some(_) => {
++                self.scan_id.set(self.scan_id.get() + 1);
++                self.scan_time.set(eventtime);
++                self.respond(&format!("tag {}: {}", uid, self.describe()));
++            }
++        }
++        self.send_tag_event(PyVal::Str(uid), filament.unwrap_or(PyVal::None))?;
++        if self.tag_gcode.is_some() {
++            let r = self.clone();
++            self.reactor.register_callback(move |et| r.run_tag_gcode(et), NOW);
++        }
++        Ok(next)
++    }
++
++    /// send_event("canvas_rfid:tag", name, uid, filament)
++    fn send_tag_event(&self, uid: PyVal, filament: PyVal) -> KResult<()> {
++        self.printer.send_event("canvas_rfid:tag", &[&self.name, &uid, &filament])
++    }
++
++    /// filament[key], as python's str() of it
++    fn field(&self, key: &str) -> PyVal {
++        match self.filament.borrow().as_ref().map(|f| f.get()) {
++            Some(PyVal::Dict(d)) => d.get(key).cloned().unwrap_or(PyVal::None),
++            _ => PyVal::None,
++        }
++    }
++
++    fn describe(&self) -> String {
++        let mut words = vec![self.field("type").str()];
++        words.extend(self.field("modifiers").items().unwrap_or(&[]).iter().map(|m| m.str()));
++        format!(
++            "{} {} #{} {}-{}C ({})",
++            self.field("manufacturer").str(),
++            words.join(" "),
++            self.field("color_hex").str(),
++            self.field("hotend_min_temp_c").as_i64().unwrap_or(0),
++            self.field("hotend_max_temp_c").as_i64().unwrap_or(0),
++            self.field("source_processor").str()
++        )
++    }
++
++    fn respond(&self, msg: &str) {
++        if let Ok(gcode) = self.printer.lookup::<GCodeDispatch>("gcode") {
++            gcode.respond_info(&format!("Canvas RFID {}: {}", self.name, msg), true);
++        }
++    }
++
++    /// dict(self.filament or {})
++    fn filament_dict(&self) -> PyVal {
++        match self.filament.borrow().as_ref() {
++            Some(f) => f.clone(),
++            None => PyVal::dict(),
++        }
++    }
++
++    fn run_tag_gcode(&self, eventtime: f64) {
++        let Some(template) = &self.tag_gcode else { return };
++        let mut context = create_template_context(&self.printer, Some(eventtime));
++        context.insert("uid".into(), Value::from_pyval(&self.uid.borrow().clone().map(PyVal::Str).unwrap_or(PyVal::None)));
++        context.insert("filament".into(), Value::from_pyval(&self.filament_dict()));
++        context.insert("scan_id".into(), Value::Int(self.scan_id.get()));
++        let res = (|| -> KResult<()> {
++            let script = template.render(Some(context))?;
++            self.printer.lookup::<GCodeDispatch>("gcode")?.run_script(&script)
++        })();
++        if let Err(e) = res {
++            logging::exception_err(&format!("canvas_rfid {}: tag_gcode error", self.name), &e);
++        }
++    }
++
++    fn cmd_query_canvas_rfid(&self, gcmd: &GCodeCommand) -> KResult<()> {
++        let uid = self.uid.borrow().clone();
++        let mut lines = vec![match &uid {
++            None => format!("Canvas RFID {}: no tag", self.name),
++            Some(u) => format!("Canvas RFID {}: tag {}", self.name, u),
++        }];
++        match self.filament.borrow().as_ref().map(|f| f.get()) {
++            None | Some(PyVal::None) => {
++                if uid.is_some() {
++                    lines.push("unrecognised tag".into());
++                }
++            }
++            Some(f) => {
++                lines.push(format!("last scan (#{}): {}", self.scan_id.get(), self.describe()));
++                if let PyVal::Dict(d) = f {
++                    for (k, v) in d {
++                        if !["colors", "colors_rgba", "colors_rgba_hex"].contains(&k.as_ref()) {
++                            lines.push(format!("{}: {}", k, v.str()));
++                        }
++                    }
++                }
++            }
++        }
++        gcmd.respond_info(&lines.join("\n"), true);
++        Ok(())
++    }
++
++    fn cmd_canvas_rfid_dump(&self, gcmd: &GCodeCommand) -> KResult<()> {
++        let start = gcmd.get_int("START", Some(0), Lim::new().min(0).max(255))?;
++        let end = gcmd.get_int("END", Some(44), Lim::new().min(start).max(255))?;
++        let Some(pages) = self.read_pages(start, end)? else {
++            return Err(gcmd.error(format!("Canvas RFID {}: read failed", self.name)));
++        };
++        let lines: Vec<String> = pages
++            .chunks(4)
++            .enumerate()
++            .map(|(i, p)| {
++                let hex: Vec<String> = p.iter().map(|b| format!("{:02x}", b)).collect();
++                format!("page {:3}: {}", start + i as i64, hex.join(" "))
++            })
++            .collect();
++        gcmd.respond_info(&lines.join("\n"), true);
++        Ok(())
++    }
++}
++
++impl PrinterObject for CanvasRfid {
++    fn has_status(&self) -> bool {
++        true
++    }
++    fn get_status(&self, eventtime: f64) -> Option<PyVal> {
++        let uid = self.uid.borrow().clone();
++        Some(PyVal::Dict(crate::pydict! {
++            "tag_present" => PyVal::Bool(uid.is_some()),
++            "uid" => uid.map(PyVal::Str).unwrap_or(PyVal::None),
++            "filament" => self.filament_dict(),
++            "scan_id" => PyVal::Int(self.scan_id.get()),
++            "scan_age" => PyVal::Float(if self.scan_id.get() != 0 { eventtime - self.scan_time.get() } else { 0.0 }),
++            "errors" => PyVal::Int(self.errors.get()),
++            "version" => self.version.borrow().clone().map(PyVal::Str).unwrap_or(PyVal::None),
++        }))
++    }
++}
++
++pub fn load_config_prefix(config: &ConfigWrapper) -> KResult<PObj> {
++    Ok(CanvasRfid::new(config)?)
++}
+diff --git a/src/extras/mod.rs b/src/extras/mod.rs
+index e04429b..bb6e301 100644
+--- a/src/extras/mod.rs
++++ b/src/extras/mod.rs
+@@ -29,6 +29,9 @@ pub mod canbus_ids;
+ pub mod canbus_stats;
+ // COSMOS (Rusticc)
+ pub mod canvas_filament_sensor;
++// COSMOS (Rusticc): OpenRFID runs on the plugins' CPython
++#[cfg(feature = "plugins")]
++pub mod canvas_rfid;
+ pub mod control_mpc;
+ pub mod controller_fan;
+ pub mod dac084s085;
+@@ -185,6 +188,8 @@ pub static MODULES: &[PrinterModule] = &[
+     PrinterModule { name: "canbus_ids", ported: true, load_config: Some(canbus_ids::load_config), load_config_prefix: None, register_components: None },
+     PrinterModule { name: "canbus_stats", ported: true, load_config: None, load_config_prefix: Some(canbus_stats::load_config_prefix), register_components: None },
+     PrinterModule { name: "canvas_filament_sensor", ported: true, load_config: Some(canvas_filament_sensor::load_config), load_config_prefix: None, register_components: None },
++    #[cfg(feature = "plugins")]
++    PrinterModule { name: "canvas_rfid", ported: true, load_config: None, load_config_prefix: Some(canvas_rfid::load_config_prefix), register_components: None },
+     PrinterModule { name: "control_mpc", ported: true, load_config: None, load_config_prefix: None, register_components: None },
+     PrinterModule { name: "controller_fan", ported: true, load_config: None, load_config_prefix: Some(controller_fan::load_config_prefix), register_components: None },
+     PrinterModule { name: "dac084S085", ported: true, load_config: None, load_config_prefix: Some(dac084s085::load_config_prefix), register_components: None },

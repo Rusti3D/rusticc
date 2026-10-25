@@ -1,0 +1,7 @@
+SHOULD_FAIL
+# Rusticc: drv8833, PID tune without status replies (times out)
+CONFIG drv8833.cfg
+DICTIONARY atmega2560.dict canvas=cc1_canvas.dict
+
+G4 P100
+DRV8833_PID_TUNE NAME=lane2 SETTLE_TIME=0.1 SAMPLE_TIME=0.1

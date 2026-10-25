@@ -12,18 +12,25 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
 - `docs/cosmos_audit.md` covers every COSMOS change: what it does, why COSMOS made it, and what Rusticc does about it.
 - `reference-patches/` holds the COSMOS patches that had to be rebased onto 5b59427 for the reference.
 
-## Status (2026-10-24)
+## Status (2026-10-25)
 
 Ported and checked against the COSMOS reference (`tools/ref_setup.sh`, then `tools/case_cmp.sh`):
 the host patches 0001-remove-save-config-subfile-check, 0002-reduce-calibration-difference-tolerance,
 0001-Reduce-log-rotate-threshold, 0001-implement-pulldown-resistor-in-thermistor-calc, 0001-probe-home-z-includes-z-offset,
 0001-force-specific-input-shaper, 0004-allow-config-exclude, and the hx711s/hx717s load cell (0007). The full case set
-is 159/160 identical (printers/13 is a known timing case).
+(Kalico tests + kaliru cases + Rusticc cases) is 170/171 identical (printers/13 is a known timing case); the CC1
+config and the plugin cases are identical too. The tree is kaliru main 4120f4f + patches 0001-0020.
 
 `tools/cc1_cmp.sh` runs the user's CC1 config (AFC, AFC_ACE, knock) in batch mode with the printer's own MCU
-dictionaries (`dicts/`). Startup is identical to COSMOS.
+dictionaries (`dicts/`). Startup is identical to COSMOS. `CANVAS=1 tools/cc1_cmp.sh cases/cc1_canvas.gcode` runs
+COSMOS's stock config with the Elegoo Canvas instead (the AFC port's parity run, docs/AFC_PORT.md).
 
-Not ported yet: the drv8833, canvas_rfid and canvas_filament_sensor host modules (not in the user's CC1 config).
+Every COSMOS host module is ported (2026-10-25, patches 0015-0017): drv8833 (CANVAS lane motors
+and their PID tune), canvas_filament_sensor (the CC2 RS-485 sensor as button pins, through
+`buttons::ButtonsHost`) and canvas_rfid (the CANVAS NFC reader; OpenRFID's tag decoders run on the plugins'
+CPython, imported from `/usr/share/openrfid` as COSMOS does). Their cases are in `cases/` (drv8833*,
+canvas_filament_sensor*, canvas_rfid_*). The reader's I2C exchange itself needs a CANVAS board: batch mode has
+no MCU replies (the reference hangs on the first poll) and the user's CC1 has no CANVAS.
 
 ## Firmware (kaliru-mcu, `firmware/`, 2026-10-25)
 

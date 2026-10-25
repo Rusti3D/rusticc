@@ -1,0 +1,7 @@
+# Rusticc: COSMOS canvas_filament_sensor (CC2 RS-485 sensor as button pins), no sensor attached
+CONFIG canvas_filament_sensor.cfg
+DICTIONARY atmega2560.dict canvas=cc1_canvas.dict
+
+G4 P6000
+QUERY_FILAMENT_SENSOR SENSOR=fs
+QUERY_FILAMENT_SENSOR SENSOR=fs_inverted

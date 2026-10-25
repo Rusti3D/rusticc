@@ -1,0 +1,6 @@
+SHOULD_FAIL
+# Rusticc: canvas_filament_sensor with an unknown pin (error at connect)
+CONFIG canvas_filament_sensor_badpin.cfg
+DICTIONARY atmega2560.dict canvas=cc1_canvas.dict
+
+G4 P100

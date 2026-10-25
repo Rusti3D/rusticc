@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sat, 24 Oct 2026 19:07:31 +0300
-Subject: [PATCH 03/14] rusticc: hx711s / hx717s load cell (COSMOS 0007), CC1
+Subject: [PATCH 03/20] rusticc: hx711s / hx717s load cell (COSMOS 0007), CC1
  bed dictionary
 
 - extras/load_cell/hx711s.rs: up to 4 HX711/HX717 chips as one load cell
@@ -312,7 +312,7 @@ index 0000000..90a7fa1
 +    }
 +}
 diff --git a/src/extras/load_cell/mod.rs b/src/extras/load_cell/mod.rs
-index 6361256..e3de762 100644
+index d7a7e7c..8f4cfe0 100644
 --- a/src/extras/load_cell/mod.rs
 +++ b/src/extras/load_cell/mod.rs
 @@ -8,6 +8,7 @@ pub mod ads1220;
@@ -323,7 +323,7 @@ index 6361256..e3de762 100644
  #[allow(clippy::module_inception)]
  pub mod load_cell;
  pub mod load_cell_probe;
-@@ -47,7 +48,7 @@ pub trait BulkAdcSensor {
+@@ -46,7 +47,7 @@ pub trait BulkAdcSensor {
  pub type SensorFactory = fn(&ConfigWrapper) -> KResult<Rc<dyn BulkAdcSensor>>;
  
  /// the sensors that implement BulkAdcSensor, in python's dict union order
@@ -332,7 +332,7 @@ index 6361256..e3de762 100644
      [
          ("hx711", hx71x::new_hx711),
          ("hx717", hx71x::new_hx717),
-@@ -55,6 +56,9 @@ pub fn sensor_types() -> [(&'static str, SensorFactory); 6] {
+@@ -54,6 +55,9 @@ pub fn sensor_types() -> [(&'static str, SensorFactory); 6] {
          ("ads131m02", ads131m0x::new_ads131m02),
          ("ads131m04", ads131m0x::new_ads131m04),
          ("cs1237", cs1237::new_cs1237),

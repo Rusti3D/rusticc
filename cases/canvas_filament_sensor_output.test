@@ -1,0 +1,6 @@
+SHOULD_FAIL
+# Rusticc: canvas_filament_sensor pins are button inputs only
+CONFIG canvas_filament_sensor_output.cfg
+DICTIONARY atmega2560.dict canvas=cc1_canvas.dict
+
+G4 P100

@@ -14,4 +14,10 @@ SRC_URI += " \
     file://kaliru/0012-rusticc-KALIRU_TRIM_TEXT-resident-code-working-set-a.patch \
     file://kaliru/0013-firmware-COSMOS-MCU-patches-in-Rust-drv8833-hx711s-s.patch \
     file://kaliru/0014-firmware-the-HiFi4-DSP-COSMOS-0006-in-Rust.patch \
+    file://kaliru/0015-rusticc-drv8833-host-module-COSMOS-0003-drv8833-moto.patch \
+    file://kaliru/0016-rusticc-canvas_filament_sensor-COSMOS-CC2-RS-485-fil.patch \
+    file://kaliru/0017-rusticc-canvas_rfid-COSMOS-CANVAS-NFC-reader.patch \
+    file://kaliru/0018-rusticc-errors-reach-the-flash-at-once-log-fdatasync.patch \
+    file://kaliru/0019-rusticc-drop-the-timed-log-rotation-COSMOS-replaced-.patch \
+    file://kaliru/0020-rusticc-clippy-in-the-profiler-and-git-status-helper.patch \
 "

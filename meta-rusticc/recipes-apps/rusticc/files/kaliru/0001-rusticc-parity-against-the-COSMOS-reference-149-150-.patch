@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sat, 24 Oct 2026 18:41:23 +0300
-Subject: [PATCH 01/14] rusticc: parity against the COSMOS reference, 149/150
+Subject: [PATCH 01/20] rusticc: parity against the COSMOS reference, 149/150
  identical
 
 - rusticc/tools/ref_setup.sh builds a COSMOS-style reference (~/rk/cosmos_ref:
@@ -28,10 +28,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  7 files changed, 411 insertions(+), 79 deletions(-)
 
 diff --git a/src/extras/gcode_macro.rs b/src/extras/gcode_macro.rs
-index d74b2af..1be8997 100644
+index 18254b2..a34fdfb 100644
 --- a/src/extras/gcode_macro.rs
 +++ b/src/extras/gcode_macro.rs
-@@ -461,13 +461,15 @@ impl GCodeMacro {
+@@ -439,14 +439,16 @@ impl GCodeMacro {
          let prefix = "variable_";
          for option in config.get_prefix_options(prefix)? {
              let text = config.get(&option, Dflt::Required)?;
@@ -39,6 +39,7 @@ index d74b2af..1be8997 100644
 +            match crate::pyliteral::literal_eval_json_noted(&text) {
                  Ok(literal) => {
                      m.variables.borrow_mut().insert(option[prefix.len()..].to_string(), literal);
+                     m.variables_changed();
                  }
 -                Err((cls, e)) => {
 +                Err(((cls, e), notes)) => {
@@ -51,10 +52,10 @@ index d74b2af..1be8997 100644
              }
          }
 diff --git a/src/kinematics/mod.rs b/src/kinematics/mod.rs
-index bd02f2e..a0afebd 100644
+index 73ae67f..45cb3e8 100644
 --- a/src/kinematics/mod.rs
 +++ b/src/kinematics/mod.rs
-@@ -67,6 +67,30 @@ pub trait Kinematics {
+@@ -66,6 +66,30 @@ pub trait Kinematics: std::any::Any {
  
  pub type LoadKinematics = fn(&Rc<ToolHead>, &ConfigWrapper) -> KResult<Rc<dyn Kinematics>>;
  
@@ -86,7 +87,7 @@ index bd02f2e..a0afebd 100644
  /// ported yet
  pub static KINEMATICS: &[(&str, Option<LoadKinematics>)] = &[
 diff --git a/src/printer.rs b/src/printer.rs
-index 4e06c36..e079a46 100644
+index 3121953..7b8b959 100644
 --- a/src/printer.rs
 +++ b/src/printer.rs
 @@ -26,7 +26,8 @@ use std::any::Any;
@@ -100,10 +101,10 @@ index 4e06c36..e079a46 100644
  pub const MESSAGE_READY: &str = "Printer is ready";
  
 diff --git a/src/pyfmt.rs b/src/pyfmt.rs
-index 6a87e6b..cad5b88 100644
+index 9b3f287..485ba78 100644
 --- a/src/pyfmt.rs
 +++ b/src/pyfmt.rs
-@@ -161,6 +161,95 @@ pub fn py_round(x: f64, ndigits: usize) -> f64 {
+@@ -267,6 +267,95 @@ pub fn py_round(x: f64, ndigits: usize) -> f64 {
      format!("{:.*}", ndigits, x).parse().unwrap_or(x)
  }
  
@@ -196,11 +197,11 @@ index 6a87e6b..cad5b88 100644
 +    best.map(|(s, _)| s)
 +}
 +
- /// Python's str.isspace() for one char (also the `\s` class of `re`):
- /// Rust's char::is_whitespace() plus the \x1c-\x1f separators
+ /// Python's str.isspace() for one char (also the `\s` class of `re`)
  pub fn py_isspace(c: char) -> bool {
+     in_ranges(WHITESPACE, c as u32)
 diff --git a/src/pyliteral.rs b/src/pyliteral.rs
-index 5d88642..36aecc6 100644
+index 2376075..08595d4 100644
 --- a/src/pyliteral.rs
 +++ b/src/pyliteral.rs
 @@ -819,94 +819,151 @@ fn malformed(n: Option<&Node>) -> LitError {
@@ -279,7 +280,7 @@ index 5d88642..36aecc6 100644
 +                Ok(Value::tuple(v))
 +            }
 +            Lit::Dict(entries) => {
-+                let mut d = IndexMap::new();
++                let mut d = IndexMap::default();
 +                for (k, l) in entries {
 +                    let k = match k {
 +                        DictKey::K(k) if matches!(k.0, Value::Tuple(_)) => return Err(key_error("tuple")),
@@ -359,7 +360,7 @@ index 5d88642..36aecc6 100644
 -        Node::SetCall(_) => Ok(Conv::NotJson("set")),
 +        Node::SetCall(_) => Ok(Lit::Opaque("set")),
          Node::Dict(items, _) => {
--            let mut d = IndexMap::new();
+-            let mut d = IndexMap::default();
 -            let mut bad = None;
 +            // dict(zip(map(_convert, keys), map(_convert, values))): pair by
 +            // pair, a repeated key keeps its place and takes the new value
@@ -491,10 +492,10 @@ index 5d88642..36aecc6 100644
      }
  }
 diff --git a/src/toolhead.rs b/src/toolhead.rs
-index 5555f2e..1c3c47e 100644
+index f749fb0..fe5081c 100644
 --- a/src/toolhead.rs
 +++ b/src/toolhead.rs
-@@ -401,7 +401,11 @@ impl ToolHead {
+@@ -400,7 +400,11 @@ impl ToolHead {
                      // ModuleNotFoundError from importlib (of the first missing
                      // dotted component)
                      let module = format!("klippy.kinematics.{}", kin_name.split('.').next().unwrap_or(""));
@@ -508,7 +509,7 @@ index 5555f2e..1c3c47e 100644
                      logging::exception_err(&msg, &cause);
                      return Err(KError::config(msg).with_context(cause));
 diff --git a/src/util.rs b/src/util.rs
-index eb549c8..e5895ee 100644
+index f552679..1b97143 100644
 --- a/src/util.rs
 +++ b/src/util.rs
 @@ -4,10 +4,10 @@
@@ -535,8 +536,8 @@ index eb549c8..e5895ee 100644
 -
  // Return the SIGINT interrupt handler back to the OS default
  pub fn fix_sigint() {
-     unsafe { libc::signal(libc::SIGINT, libc::SIG_DFL) };
-@@ -171,13 +168,113 @@ pub struct GitInfo {
+     // SAFETY: SIG_DFL is a valid disposition and no handler is installed
+@@ -191,13 +188,113 @@ pub struct GitInfo {
      pub url: String,
  }
  

@@ -4,11 +4,11 @@ HOMEPAGE = "https://github.com/Rusti3D/kaliru"
 LICENSE = "GPL-3.0-only"
 LIC_FILES_CHKSUM = "file://COPYING;md5=1ebbd3e34237af26da5dc08a4e440464"
 
-# kaliru (branch plugins until it merges into main) with Rusticc's patches,
+# kaliru (branch rustify until it merges into main) with Rusticc's patches,
 # as COSMOS builds Kalico with its own: files/kaliru, listed by
 # rusticc-patches.inc (tools/kaliru-tree.sh / kaliru-export.sh)
-SRC_URI = "git://github.com/Rusti3D/kaliru.git;protocol=https;branch=plugins"
-SRCREV = "85165979a6a04de86558c8237c839738e641ae5d"
+SRC_URI = "git://github.com/Rusti3D/kaliru.git;protocol=https;branch=main"
+SRCREV = "4120f4f564cd8512a36f37e7a2e8472cee645359"
 PV = "0.1.0+git"
 
 require rusticc-patches.inc

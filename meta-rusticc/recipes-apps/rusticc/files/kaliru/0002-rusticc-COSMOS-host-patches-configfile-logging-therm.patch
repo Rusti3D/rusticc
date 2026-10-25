@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sat, 24 Oct 2026 18:54:57 +0300
-Subject: [PATCH 02/14] rusticc: COSMOS host patches (configfile, logging,
+Subject: [PATCH 02/20] rusticc: COSMOS host patches (configfile, logging,
  thermistor, probe, shaper, load cell)
 
 - 0001-remove-save-config-subfile-check: no autosave strip on load, no
@@ -31,7 +31,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  7 files changed, 218 insertions(+), 56 deletions(-)
 
 diff --git a/src/configfile.rs b/src/configfile.rs
-index 48a06ce..b04e19c 100644
+index e324711..a1fb37c 100644
 --- a/src/configfile.rs
 +++ b/src/configfile.rs
 @@ -870,8 +870,19 @@ impl PrinterConfig {
@@ -67,7 +67,7 @@ index 48a06ce..b04e19c 100644
          self.autosave = Some(self.build_config_wrapper(&autosave_data, &filename)?);
          self.build_config_wrapper(&format!("{}{}", regular_data, autosave_data), &filename)
      }
-@@ -1090,29 +1101,6 @@ impl PrinterConfig {
+@@ -1093,29 +1104,6 @@ impl PrinterConfig {
          }
      }
  
@@ -97,7 +97,7 @@ index 48a06ce..b04e19c 100644
      fn write_backup(&self, cfgpath: &str, cfgdata: &str) -> std::result::Result<(), String> {
          let printercfg = &self.config_file;
          let configdir = pyglob::dirname(printercfg);
-@@ -1229,8 +1217,7 @@ impl PrinterConfig {
+@@ -1232,8 +1220,7 @@ impl PrinterConfig {
          if autosave_includes {
              self.save_includes(&cfgname, &data, &mut HashSet::new())?;
          }
@@ -108,7 +108,7 @@ index 48a06ce..b04e19c 100644
          self.write_backup(&cfgname, &data)?;
          Ok(true)
 diff --git a/src/extras/load_cell/load_cell.rs b/src/extras/load_cell/load_cell.rs
-index bb7c36b..71e0deb 100644
+index 0c71a02..a1b1d19 100644
 --- a/src/extras/load_cell/load_cell.rs
 +++ b/src/extras/load_cell/load_cell.rs
 @@ -463,9 +463,10 @@ impl LoadCellGuidedCalibrationHelper {
@@ -125,10 +125,10 @@ index bb7c36b..71e0deb 100644
          }
          // only set _counts_per_gram after all errors are raised
 diff --git a/src/extras/probe.rs b/src/extras/probe.rs
-index 6b6dbd0..dad4c74 100644
+index 82b66d3..ef77ac9 100644
 --- a/src/extras/probe.rs
 +++ b/src/extras/probe.rs
-@@ -942,7 +942,8 @@ impl PrinterProbe {
+@@ -918,7 +918,8 @@ impl PrinterProbe {
              let toolhead = self.toolhead()?;
              toolhead.get_last_move_time()?;
              let mut toolhead_pos = toolhead.get_position();
@@ -139,10 +139,10 @@ index 6b6dbd0..dad4c74 100644
          }
          Ok(())
 diff --git a/src/extras/resonance_tester.rs b/src/extras/resonance_tester.rs
-index ef19c53..b4da5e0 100644
+index 9122c69..fde3be8 100644
 --- a/src/extras/resonance_tester.rs
 +++ b/src/extras/resonance_tester.rs
-@@ -662,6 +662,13 @@ impl ResonanceTester {
+@@ -658,6 +658,13 @@ impl ResonanceTester {
              Some(m) => Some(gcmd.get_float("MAX_SMOOTHING", Some(m), lim)?),
              None => gcmd.get_float_opt("MAX_SMOOTHING", lim)?,
          };
@@ -156,7 +156,7 @@ index ef19c53..b4da5e0 100644
          let name_suffix = gcmd.get_or("NAME", &strftime_local("%Y%m%d_%H%M%S"));
          if !is_valid_name(&name_suffix) {
              return Err(gcmd.error("Invalid NAME parameter"));
-@@ -689,7 +696,7 @@ impl ResonanceTester {
+@@ -685,7 +692,7 @@ impl ResonanceTester {
              let scv = toolhead_status(&toolhead, systime, "square_corner_velocity");
              let max_freq = self.get_max_calibration_freq();
              let logger = |m: &str| gcmd.respond_info(m, true);
@@ -353,7 +353,7 @@ index fbb0867..4d0e449 100644
 +    }
 +}
 diff --git a/src/queuelogger.rs b/src/queuelogger.rs
-index 8a5ace7..cd7aa02 100644
+index 0d21222..d6a0628 100644
 --- a/src/queuelogger.rs
 +++ b/src/queuelogger.rs
 @@ -1,6 +1,8 @@
@@ -375,7 +375,7 @@ index 8a5ace7..cd7aa02 100644
  use std::sync::mpsc;
  use std::sync::{Arc, Mutex};
  
-@@ -192,17 +194,94 @@ impl RotatingFile {
+@@ -183,17 +185,94 @@ impl RotatingFile {
      }
  }
  
@@ -474,7 +474,7 @@ index 8a5ace7..cd7aa02 100644
          let mut lines: Vec<String> = self.rollover_info.values().cloned().collect();
          lines.push(format!("=============== Log rollover at {} ===============", crate::util::asctime_local(now() as f64)));
          self.emit(&lines.join("\n"));
-@@ -210,7 +289,7 @@ impl Inner {
+@@ -201,7 +280,7 @@ impl Inner {
  
      /// BaseRotatingHandler.emit
      fn emit(&mut self, msg: &str) {
@@ -483,7 +483,7 @@ index 8a5ace7..cd7aa02 100644
              self.do_rollover();
          }
          self.file.write_line(msg);
-@@ -225,9 +304,10 @@ pub struct QueueListener {
+@@ -216,9 +295,10 @@ pub struct QueueListener {
  }
  
  impl QueueListener {
@@ -497,7 +497,7 @@ index 8a5ace7..cd7aa02 100644
          let (tx, rx) = mpsc::channel::<Option<String>>();
          let i = inner.clone();
          let thread = std::thread::spawn(move || {
-@@ -316,4 +396,28 @@ mod tests {
+@@ -307,4 +387,28 @@ mod tests {
          assert!(names.contains(&"klippy.log.notadate".to_string()));
          let _ = std::fs::remove_dir_all(&dir);
      }

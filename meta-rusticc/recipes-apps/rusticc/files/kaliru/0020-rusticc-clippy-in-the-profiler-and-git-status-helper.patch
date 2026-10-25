@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sun, 25 Oct 2026 15:10:53 +0200
+Subject: [PATCH 20/20] rusticc: clippy in the profiler and git status helpers
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
+---
+ src/pcprof.rs | 9 +++------
+ src/util.rs   | 2 +-
+ 2 files changed, 4 insertions(+), 7 deletions(-)
+
+diff --git a/src/pcprof.rs b/src/pcprof.rs
+index 5298465..0dcf400 100644
+--- a/src/pcprof.rs
++++ b/src/pcprof.rs
+@@ -85,7 +85,7 @@ pub fn start() {
+         }
+         out += &format!("samples {} interval_us 2000 secs {}\n", n, secs);
+         let mut rows: Vec<_> = hist.into_iter().collect();
+-        rows.sort_by(|a, b| b.1.cmp(&a.1));
++        rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+         for ((tid, pc, lr), c) in rows {
+             out += &format!("{} {:x} {:x} {}\n", tid, pc, lr, c);
+         }
+@@ -103,10 +103,7 @@ use std::cell::{Cell, RefCell};
+ use std::collections::HashMap;
+ 
+ thread_local! {
+-    static RP_EVERY: Cell<f64> = Cell::new(match std::env::var("KALIRU_REACTOR_PROF").ok().and_then(|s| s.parse().ok()) {
+-        Some(v) => v,
+-        None => -1.0,
+-    });
++    static RP_EVERY: Cell<f64> = Cell::new(std::env::var("KALIRU_REACTOR_PROF").ok().and_then(|s| s.parse().ok()).unwrap_or(-1.0));
+     static RP_STATS: RefCell<HashMap<String, (u64, u64)>> = RefCell::new(HashMap::new());
+     static RP_ACCOUNTED: Cell<u64> = const { Cell::new(0) };
+     static RP_LAST: Cell<f64> = const { Cell::new(0.0) };
+@@ -170,7 +167,7 @@ pub fn reactor_prof_tick(eventtime: f64) {
+     }
+     RP_LAST.with(|l| l.set(eventtime));
+     let mut rows: Vec<(String, (u64, u64))> = RP_STATS.with(|s| s.borrow_mut().drain().collect());
+-    rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
++    rows.sort_by_key(|r| std::cmp::Reverse(r.1 .1));
+     let total: u64 = rows.iter().map(|r| r.1 .1).sum();
+     crate::logging::info(&format!("reactor_prof: {:.1}s window, callbacks {:.3}s cpu", eventtime - last, total as f64 / 1e9));
+     for (k, (n, ns)) in rows.iter().take(40) {
+diff --git a/src/util.rs b/src/util.rs
+index 1b97143..5e864a0 100644
+--- a/src/util.rs
++++ b/src/util.rs
+@@ -200,7 +200,7 @@ pub fn get_git_version() -> GitInfo {
+             info.version = bytes_strip(&ver);
+             match git(&gitdir, &["status", "--porcelain", "--ignored"]) {
+                 Ok((0, stat, _)) => {
+-                    info.file_status = bytes_strip(&stat).split('\n').map(|l| py_split_maxsplit1(l)).collect();
++                    info.file_status = bytes_strip(&stat).split('\n').map(py_split_maxsplit1).collect();
+                 }
+                 Ok((_, _, err)) => logging::debug(&format!("Error getting git status: {}", crate::pyfmt::py_bytes_repr(&err))),
+                 Err(e) => logging::debug(&format!("Exception on run: {}", e)),

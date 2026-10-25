@@ -1,0 +1,362 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sun, 25 Oct 2026 14:54:51 +0200
+Subject: [PATCH 19/20] rusticc: drop the timed log rotation COSMOS replaced;
+ pcprof cast
+
+COSMOS rotates klippy.log by size, so kaliru's TimedRotatingFileHandler port
+and its parity harness (qltest, ql_cmp.sh) only remained as unused code and
+build warnings. pcprof: the signal handler goes through a pointer cast.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
+---
+ Cargo.toml          |   4 -
+ docs/PARITY.md      |   2 +-
+ src/bin/qltest.rs   |  15 ----
+ src/pcprof.rs       |   2 +-
+ src/queuelogger.rs  | 199 +-------------------------------------------
+ tools/check_all.sh  |   1 -
+ tools/ql_cmp.sh     |  13 ---
+ tools/qltest_ref.py |  14 ----
+ 8 files changed, 4 insertions(+), 246 deletions(-)
+ delete mode 100644 src/bin/qltest.rs
+ delete mode 100644 tools/ql_cmp.sh
+ delete mode 100644 tools/qltest_ref.py
+
+diff --git a/Cargo.toml b/Cargo.toml
+index a11afe8..a26a919 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -24,10 +24,6 @@ path = "src/bin/configdump.rs"
+ name = "pinsdump"
+ path = "src/bin/pinsdump.rs"
+ 
+-[[bin]]
+-name = "qltest"
+-path = "src/bin/qltest.rs"
+-
+ [[bin]]
+ name = "reactortest"
+ path = "src/bin/reactortest.rs"
+diff --git a/docs/PARITY.md b/docs/PARITY.md
+index 30e24ce..1a74eed 100644
+--- a/docs/PARITY.md
++++ b/docs/PARITY.md
+@@ -30,7 +30,7 @@ What must match per run: serialqueue trace, exit code, masked log (see `tools/re
+ | `src/reactor.rs` | `klippy/reactor.py` (SelectReactor logic + PollReactor fds) | `tools/reactor_cmp.sh`: 10 scenarios (timers, nested pause, re-pause, completion, mutex, register_callback, async thread callback, assert_no_pause, sys pause, delay_for_ms), event order + greenlet count, 3 runs; also armv7 under qemu | identical |
+ | `src/chelper/pyhelper.rs` | `chelper/pyhelper.c` (all) | used by reactor (get_monotonic) | dump_string / fill_time untested until serialqueue |
+ | `src/util.rs` | `klippy/util.py` (all) | reactor_cmp (set_nonblock); rest used from printer.py on | get_git_version = tracked KALICO_VERSION, branch/remote/url "?"; dump_mcu_build looks one dir above the binary |
+-| `src/queuelogger.rs` | `klippy/queuelogger.py` + py3.13 `TimedRotatingFileHandler` | `tools/ql_cmp.sh`: computeRollover in 3 time zones across DST (90 cases); unit test: rotation names + backupCount deletion | identical; tracebacks of logging.exception not written |
++| `src/queuelogger.rs` | `klippy/queuelogger.py` + COSMOS 0001-Reduce-log-rotate-threshold (py3.15 `RotatingFileHandler`) | unit test: size rollover, backup names | identical; tracebacks of logging.exception not written |
+ | (none) | `klippy/compat.py` | n/a: python import-hook aliases for legacy plugins; a compiled binary has no imports (static registry instead) | n/a |
+ | `src/error.rs` | (python exception classes) | used everywhere | KError carries the python class (`Py`, `CommandSub`) and `__context__` chains (`Chained`) |
+ | `src/printer.rs` | `klippy/printer.py` (Printer, main, options, registry) | stock suite + custom cases | identical |
+diff --git a/src/bin/qltest.rs b/src/bin/qltest.rs
+deleted file mode 100644
+index 088cab1..0000000
+--- a/src/bin/qltest.rs
++++ /dev/null
+@@ -1,15 +0,0 @@
+-// Prints TimedRotatingFileHandler.computeRollover() results for timestamps
+-// given on the command line; twin of tools/qltest_ref.py. Development tool.
+-// usage: qltest <dir> <timestamp>...
+-use kaliru::queuelogger::{RotatingFile, When};
+-
+-fn main() {
+-    let args: Vec<String> = std::env::args().skip(1).collect();
+-    let log = format!("{}/ql.log", args[0]);
+-    for (name, when) in [("midnight", When::Midnight), ("S", When::Seconds)] {
+-        let f = RotatingFile::new(&log, when).unwrap();
+-        for t in &args[1..] {
+-            println!("{} {} {}", name, t, f.compute_rollover(t.parse().unwrap()));
+-        }
+-    }
+-}
+diff --git a/src/pcprof.rs b/src/pcprof.rs
+index c748a94..5298465 100644
+--- a/src/pcprof.rs
++++ b/src/pcprof.rs
+@@ -52,7 +52,7 @@ pub fn start() {
+         std::thread::sleep(std::time::Duration::from_secs(delay));
+         unsafe {
+             let mut sa: libc::sigaction = std::mem::zeroed();
+-            sa.sa_sigaction = on_prof as usize;
++            sa.sa_sigaction = on_prof as *const () as usize;
+             sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
+             libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
+             let tv = libc::timeval { tv_sec: 0, tv_usec: 2000 };
+diff --git a/src/queuelogger.rs b/src/queuelogger.rs
+index d2bc26d..3ce0201 100644
+--- a/src/queuelogger.rs
++++ b/src/queuelogger.rs
+@@ -1,8 +1,6 @@
+ // Code to implement asynchronous logging from a background thread
+-// (port of klippy/queuelogger.py, with the parts of python 3.13's
+-// logging.handlers.TimedRotatingFileHandler it relies on; sources in ref/).
+-// Rusticc: COSMOS's 0001-Reduce-log-rotate-threshold makes the listener a
+-// RotatingFileHandler (5 MiB, 2 backups): SizeRotatingFile.
++// (port of klippy/queuelogger.py with COSMOS's 0001-Reduce-log-rotate-threshold:
++// the listener is python 3.15's RotatingFileHandler, 5 MiB, 2 backups).
+ //
+ // Copyright (C) 2016-2019  Kevin O'Connor <kevin@koconnor.net>
+ //
+@@ -14,177 +12,10 @@ use std::io::{Seek, SeekFrom, Write};
+ use std::sync::mpsc;
+ use std::sync::{Arc, Mutex};
+ 
+-const MIDNIGHT: i64 = 24 * 60 * 60;
+-
+-#[derive(Clone, Copy, Debug, PartialEq)]
+-pub enum When {
+-    /// when="S", interval=60*60*24 (rotate_log_at_restart)
+-    Seconds,
+-    /// when="midnight"
+-    Midnight,
+-}
+-
+-struct LocalTm {
+-    hour: i64,
+-    min: i64,
+-    sec: i64,
+-    isdst: i32,
+-}
+-
+-fn localtime(t: i64) -> LocalTm {
+-    // SAFETY: tm is plain data (zeroed is valid) filled by the reentrant localtime_r
+-    unsafe {
+-        let tt = t as libc::time_t;
+-        let mut tm: libc::tm = std::mem::zeroed();
+-        libc::localtime_r(&tt, &mut tm);
+-        LocalTm { hour: tm.tm_hour as i64, min: tm.tm_min as i64, sec: tm.tm_sec as i64, isdst: tm.tm_isdst }
+-    }
+-}
+-
+-use crate::util::strftime_local;
+-
+ fn now() -> i64 {
+     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+ }
+ 
+-/// TimedRotatingFileHandler (backupCount=5, local time, no namer/rotator)
+-pub struct RotatingFile {
+-    base_filename: String,
+-    stream: Option<File>,
+-    when: When,
+-    interval: i64,
+-    suffix: &'static str,
+-    backup_count: usize,
+-    pub rollover_at: i64,
+-}
+-
+-impl RotatingFile {
+-    pub fn new(filename: &str, when: When) -> std::io::Result<Self> {
+-        let base_filename = crate::pyglob::abspath(filename);
+-        let stream = Some(OpenOptions::new().create(true).append(true).open(&base_filename)?);
+-        let (interval, suffix) = match when {
+-            When::Seconds => (60 * 60 * 24, "%Y-%m-%d_%H-%M-%S"),
+-            When::Midnight => (60 * 60 * 24, "%Y-%m-%d"),
+-        };
+-        let t = std::fs::metadata(&base_filename)
+-            .ok()
+-            .and_then(|m| m.modified().ok())
+-            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+-            .map(|d| d.as_secs() as i64)
+-            .unwrap_or_else(now);
+-        let mut f = RotatingFile { base_filename, stream, when, interval, suffix, backup_count: 5, rollover_at: 0 };
+-        f.rollover_at = f.compute_rollover(t);
+-        Ok(f)
+-    }
+-
+-    /// computeRollover(currentTime)
+-    pub fn compute_rollover(&self, current_time: i64) -> i64 {
+-        let mut result = current_time + self.interval;
+-        if self.when == When::Midnight {
+-            let t = localtime(current_time);
+-            let mut r = MIDNIGHT - ((t.hour * 60 + t.min) * 60 + t.sec);
+-            if r <= 0 {
+-                r += MIDNIGHT;
+-            }
+-            result = current_time + r;
+-            result += self.interval - MIDNIGHT;
+-            let dst_now = t.isdst;
+-            let dst_at_rollover = localtime(result).isdst;
+-            if dst_now != dst_at_rollover {
+-                let addend = if dst_now == 0 {
+-                    // DST kicks in before next rollover, so we need to deduct an hour
+-                    if localtime(result - 3600).isdst == 0 {
+-                        0
+-                    } else {
+-                        -3600
+-                    }
+-                } else {
+-                    // DST bows out before next rollover, so we need to add an hour
+-                    3600
+-                };
+-                result += addend;
+-            }
+-        }
+-        result
+-    }
+-
+-    fn should_rollover(&mut self) -> bool {
+-        let t = now();
+-        if t >= self.rollover_at {
+-            let p = std::path::Path::new(&self.base_filename);
+-            if p.exists() && !p.is_file() {
+-                self.rollover_at = self.compute_rollover(t);
+-                return false;
+-            }
+-            return true;
+-        }
+-        false
+-    }
+-
+-    // extMatch fullmatch of the suffix
+-    fn ext_match(&self, s: &str) -> bool {
+-        let pat: &[u8] = match self.when {
+-            When::Seconds => b"dddd-dd-dd_dd-dd-dd",
+-            When::Midnight => b"dddd-dd-dd",
+-        };
+-        let b = s.as_bytes();
+-        b.len() == pat.len() && b.iter().zip(pat).all(|(c, p)| if *p == b'd' { c.is_ascii_digit() } else { c == p })
+-    }
+-
+-    fn get_files_to_delete(&self) -> Vec<String> {
+-        let (dir_name, base_name) = crate::pyglob::split(&self.base_filename);
+-        let prefix = format!("{}.", base_name);
+-        let mut result: Vec<String> = std::fs::read_dir(&dir_name)
+-            .map(|rd| {
+-                rd.flatten()
+-                    .map(|e| e.file_name().to_string_lossy().into_owned())
+-                    .filter(|f| f.starts_with(&prefix) && self.ext_match(&f[prefix.len()..]))
+-                    .map(|f| crate::pyglob::join(&dir_name, &[&f]))
+-                    .collect()
+-            })
+-            .unwrap_or_default();
+-        if result.len() < self.backup_count {
+-            return vec![];
+-        }
+-        result.sort();
+-        result.truncate(result.len() - self.backup_count);
+-        result
+-    }
+-
+-    /// doRollover(); returns whether rollover_at moved
+-    pub fn do_rollover(&mut self) -> bool {
+-        let before = self.rollover_at;
+-        let current_time = now();
+-        let mut t = self.rollover_at - self.interval;
+-        let dst_now = localtime(current_time).isdst;
+-        let dst_then = localtime(t).isdst;
+-        if dst_now != dst_then {
+-            t += if dst_now != 0 { 3600 } else { -3600 };
+-        }
+-        let dfn = format!("{}.{}", self.base_filename, strftime_local(self.suffix, t));
+-        if std::path::Path::new(&dfn).exists() {
+-            return false;
+-        }
+-        self.stream = None;
+-        if std::path::Path::new(&self.base_filename).exists() {
+-            let _ = std::fs::rename(&self.base_filename, &dfn);
+-        }
+-        for s in self.get_files_to_delete() {
+-            let _ = std::fs::remove_file(s);
+-        }
+-        self.stream = OpenOptions::new().create(true).append(true).open(&self.base_filename).ok();
+-        self.rollover_at = self.compute_rollover(current_time);
+-        self.rollover_at > before
+-    }
+-
+-    fn write_line(&mut self, msg: &str) {
+-        if let Some(f) = self.stream.as_mut() {
+-            let _ = f.write_all(format!("{}\n", msg).as_bytes());
+-            let _ = f.flush();
+-        }
+-    }
+-}
+-
+ /// python 3.15 logging.handlers.RotatingFileHandler (mode 'a', no
+ /// namer/rotator)
+ pub struct SizeRotatingFile {
+@@ -375,32 +206,6 @@ pub fn clear_bg_logging() {
+ mod tests {
+     use super::*;
+ 
+-    #[test]
+-    fn rollover_files() {
+-        let dir = std::env::temp_dir().join(format!("kaliru_ql_{}", std::process::id()));
+-        let _ = std::fs::remove_dir_all(&dir);
+-        std::fs::create_dir_all(&dir).unwrap();
+-        let log = dir.join("klippy.log").to_string_lossy().into_owned();
+-        // six old backups and an unrelated file
+-        for d in ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05", "2026-01-06"] {
+-            std::fs::write(format!("{}.{}", log, d), "old").unwrap();
+-        }
+-        std::fs::write(format!("{}.notadate", log), "x").unwrap();
+-        let mut f = RotatingFile::new(&log, When::Midnight).unwrap();
+-        f.write_line("hello");
+-        // force a rollover: as if the next midnight had passed
+-        f.rollover_at = now() - 1;
+-        f.interval = 60 * 60 * 24;
+-        assert!(f.do_rollover());
+-        let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+-        names.sort();
+-        // 5 backups kept (oldest two deleted), the unrelated file stays
+-        assert_eq!(names.len(), 7, "{:?}", names);
+-        assert!(!names.contains(&"klippy.log.2026-01-01".to_string()));
+-        assert!(names.contains(&"klippy.log.notadate".to_string()));
+-        let _ = std::fs::remove_dir_all(&dir);
+-    }
+-
+     #[test]
+     fn size_rollover() {
+         let dir = std::env::temp_dir().join(format!("kaliru_qls_{}", std::process::id()));
+diff --git a/tools/check_all.sh b/tools/check_all.sh
+index b71abe2..c19ba74 100644
+--- a/tools/check_all.sh
++++ b/tools/check_all.sh
+@@ -9,4 +9,3 @@ echo "== SAVE_CONFIG";           bash $T/save_cmp.sh | tail -1
+ echo "== pins";                  bash $T/pins_cmp.sh
+ echo "== reactor";               bash $T/reactor_cmp.sh | tail -1
+ echo "== serialqueue";           bash $T/sq_cmp.sh | tail -1
+-echo "== queuelogger";           bash $T/ql_cmp.sh
+diff --git a/tools/ql_cmp.sh b/tools/ql_cmp.sh
+deleted file mode 100644
+index 5a9b4ee..0000000
+--- a/tools/ql_cmp.sh
++++ /dev/null
+@@ -1,13 +0,0 @@
+-# queuelogger parity: computeRollover() for timestamps around the 2026 DST
+-# changes and ordinary times, in two time zones, python vs kaliru.
+-TOOLS=$(dirname "$(readlink -f "$0")")
+-D=~/rk/qltest; rm -rf $D; mkdir -p $D
+-# 2026-03-29 01:00 UTC (EU DST start), 2026-10-25 01:00 UTC (EU DST end), +-1h/2h, midnight edges
+-TS="1774746000 1774742400 1774749600 1774738800 1774753200 1792890000 1792886400 1792893600 1792882800 1792897200 1792800000 1792799999 1792886399 1792836000 1700000000"
+-fail=0
+-for tz in Europe/Copenhagen UTC America/New_York; do
+-    TZ=$tz ~/rk/kalico/.venv/bin/python $TOOLS/qltest_ref.py $D $TS > $D/py.txt
+-    TZ=$tz ~/rk/target/release/qltest $D $TS > $D/rust.txt
+-    if cmp -s $D/py.txt $D/rust.txt; then echo "identical: $tz ($(wc -l < $D/py.txt) cases)"; else echo "DIFF $tz"; diff $D/py.txt $D/rust.txt; fail=1; fi
+-done
+-exit $fail
+diff --git a/tools/qltest_ref.py b/tools/qltest_ref.py
+deleted file mode 100644
+index d9ee715..0000000
+--- a/tools/qltest_ref.py
++++ /dev/null
+@@ -1,14 +0,0 @@
+-#!/usr/bin/env python3
+-# Reference twin of kaliru's src/bin/qltest.rs: computeRollover() of python's
+-# TimedRotatingFileHandler as Kalico's queuelogger configures it.
+-# usage: qltest_ref.py <dir> <timestamp>...
+-import logging.handlers
+-import sys
+-
+-log = sys.argv[1] + "/ql.log"
+-for name, kw in [("midnight", dict(when="midnight", backupCount=5)),
+-                 ("S", dict(when="S", interval=60 * 60 * 24, backupCount=5))]:
+-    h = logging.handlers.TimedRotatingFileHandler(log, **kw)
+-    for t in sys.argv[2:]:
+-        print("%s %s %d" % (name, t, h.computeRollover(int(t))))
+-    h.close()

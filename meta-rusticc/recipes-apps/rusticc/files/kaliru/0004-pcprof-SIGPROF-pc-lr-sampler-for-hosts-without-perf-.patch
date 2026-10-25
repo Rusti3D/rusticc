@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sat, 24 Oct 2026 20:43:33 +0300
-Subject: [PATCH 04/14] pcprof: SIGPROF pc/lr sampler for hosts without perf
+Subject: [PATCH 04/20] pcprof: SIGPROF pc/lr sampler for hosts without perf
  (KALIRU_PCPROF), tools/pcprof_report.py
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -15,10 +15,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 tools/pcprof_report.py
 
 diff --git a/src/lib.rs b/src/lib.rs
-index 2b1ce78..a41f7af 100644
+index e304216..4f23cc9 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -12,6 +12,7 @@ pub mod kinematics;
+@@ -45,6 +45,7 @@ pub mod kinematics;
  pub mod logging;
  pub mod mathutil;
  pub mod numpy_fft;
@@ -114,10 +114,10 @@ index 0000000..5f9fd3e
 +    });
 +}
 diff --git a/src/printer.rs b/src/printer.rs
-index e079a46..22a5a3e 100644
+index 7b8b959..f81385c 100644
 --- a/src/printer.rs
 +++ b/src/printer.rs
-@@ -848,6 +848,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
+@@ -839,6 +839,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
  
  pub fn main() {
      crate::util::fix_sigint();

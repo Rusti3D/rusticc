@@ -1,0 +1,12 @@
+# Rusticc: COSMOS drv8833 (CANVAS lane motors), host commands without the MCU's replies
+CONFIG drv8833.cfg
+DICTIONARY atmega2560.dict canvas=cc1_canvas.dict
+
+G4 P100
+DRV_SET_SPEED NAME=lane1 SPEED=40
+DRV_SET_SPEED NAME=lane1 SPEED=-25.5
+DRV_SET_SPEED NAME=lane1 SPEED=0
+SET_DRV8833_PID NAME=lane2 KP=1.5 KI=0.25 KD=0.125 SAVE=1
+DRV_SET_PID NAME=lane1 KP=3
+MOVE_DEBUG NAME=lane1 TIME=0.2 DIRECTION=backwards SPEED=10
+G4 P100

@@ -1,0 +1,6 @@
+SHOULD_FAIL
+# Rusticc: canvas_rfid without an OpenRFID tree
+CONFIG canvas_rfid_nolib.cfg
+DICTIONARY atmega2560.dict canvas=cc1_canvas.dict
+
+G4 P100

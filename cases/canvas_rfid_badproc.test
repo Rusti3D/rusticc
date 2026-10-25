@@ -1,0 +1,6 @@
+SHOULD_FAIL
+# Rusticc: canvas_rfid with an unknown OpenRFID processor
+CONFIG canvas_rfid_badproc.cfg
+DICTIONARY atmega2560.dict canvas=cc1_canvas.dict
+
+G4 P100

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 00:09:32 +0300
-Subject: [PATCH 11/14] rusticc: reactor callback profiler
+Subject: [PATCH 11/20] rusticc: reactor callback profiler
  (KALIRU_REACTOR_PROF): exclusive cpu per timer / fd callback, python timers
  by name, status per object
 
@@ -108,7 +108,7 @@ index 04cf5f7..9ef6a4b 100644
 +    }
 +}
 diff --git a/src/plugins/impls/reactor.rs b/src/plugins/impls/reactor.rs
-index c958977..7665533 100644
+index 8195ee1..a89cad5 100644
 --- a/src/plugins/impls/reactor.rs
 +++ b/src/plugins/impls/reactor.rs
 @@ -81,8 +81,10 @@ fn call_reporting(cb: &PyRef, eventtime: f64) -> Option<PyRef> {
@@ -124,10 +124,10 @@ index c958977..7665533 100644
              Some(Err(e)) => {
                  report_unhandled(&e);
 diff --git a/src/reactor.rs b/src/reactor.rs
-index 60445f8..0db5280 100644
+index f3f7cde..3bdb9f7 100644
 --- a/src/reactor.rs
 +++ b/src/reactor.rs
-@@ -310,7 +310,8 @@ impl Reactor {
+@@ -311,7 +311,8 @@ impl Reactor {
              if eventtime >= waketime {
                  t.waketime.set(NEVER);
                  t.timer_is_running.set(true);
@@ -137,7 +137,7 @@ index 60445f8..0db5280 100644
                  t.waketime.set(waketime);
                  t.timer_is_running.set(false);
                  if !same(&g_dispatch, &self.g_dispatch.borrow()) {
-@@ -541,7 +542,7 @@ impl Reactor {
+@@ -545,7 +546,7 @@ impl Reactor {
              let hdl = self.fds.borrow().get(&fd).cloned().unwrap_or_else(|| self.dummy_fd_hdl.clone());
              if event & self.read_mask != 0 {
                  let cb = hdl.read_callback.clone();
@@ -146,7 +146,7 @@ index 60445f8..0db5280 100644
                  if !same(&g_dispatch, &self.g_dispatch.borrow()) {
                      self.end_greenlet(g_dispatch.unwrap());
                      return self.monotonic();
-@@ -588,6 +589,7 @@ impl Reactor {
+@@ -594,6 +595,7 @@ impl Reactor {
              busy = false;
              let res = self.poll((timeout * 1000.0).ceil() as i32);
              eventtime = self.monotonic();
@@ -155,10 +155,10 @@ index 60445f8..0db5280 100644
                  busy = true;
                  eventtime = self.check_fds(eventtime, &res);
 diff --git a/src/webhooks.rs b/src/webhooks.rs
-index 91aaf67..4a519ae 100644
+index d12dced..c67ee62 100644
 --- a/src/webhooks.rs
 +++ b/src/webhooks.rs
-@@ -976,10 +976,11 @@ impl QueryStatusHelper {
+@@ -1025,10 +1025,11 @@ impl QueryStatusHelper {
                  let sub = subscription.borrow();
                  for (obj_name, req) in sub.iter() {
                      if !query.contains_key(obj_name) {

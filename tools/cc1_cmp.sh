@@ -5,7 +5,8 @@
 # COSMOS reference (ref_setup.sh) and with Rusticc, diffed like case_cmp.sh.
 # The config is staged in ~/rk/cc1_stage (/etc/klipper paths point there),
 # fresh for each side; the addons go into the reference's klippy for the run.
-# usage: cc1_cmp.sh [extra gcode file]
+# usage: [CANVAS=1] cc1_cmp.sh [extra gcode file]
+# CANVAS=1: COSMOS's stock config with the Elegoo Canvas (AFC_canvas) instead
 set -e
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 # (in the kaliru tree with the Rusticc patches: tools/kaliru-tree.sh)
@@ -31,9 +32,19 @@ stage() {
     awk '/^\[/ { skip = ($0 == "[gamepad_jog]" || $0 ~ /^\[gcode_macro GAMEPAD_(ON|OFF)\]$/) } !skip' \
         $STAGE/config/printer.cfg > $STAGE/printer.tmp && mv $STAGE/printer.tmp $STAGE/config/printer.cfg
     sed -i "s#/etc/klipper#$STAGE#g" $REF/klippy/plugins/AFC_ACE/config/*.cfg
+    dicts="cc1_dsp.dict bed=cc1_bed.dict hotend=cc1_toolhead.dict"
+    if [ -n "$CANVAS" ]; then
+        # COSMOS's stock Canvas setup instead of the user's printer.cfg:
+        # elegoo_canvas in cosmos.conf makes build-klipper-var-config add
+        # the include to zextras.cfg; OpenRFID from the local tree
+        echo "[include klipper-readonly/*.cfg]" > $STAGE/config/printer.cfg
+        echo "[include ../extras-readonly/canvas.cfg]" >> $STAGE/config/klipper-readonly/zextras.cfg
+        sed -i "/^\[canvas_rfid CANVAS_1\]/a openrfid_path: $HOME/rk/openrfid/src" $STAGE/config/extras-readonly/canvas.cfg
+        dicts="$dicts canvas=cc1_canvas.dict"
+    fi
     {
         echo "CONFIG config/printer.cfg"
-        echo "DICTIONARY cc1_dsp.dict bed=cc1_bed.dict hotend=cc1_toolhead.dict"
+        echo "DICTIONARY $dicts"
         echo "G4 P1000"
         if [ -n "$EXTRA" ]; then cat "$EXTRA"; fi
     } > $STAGE/cc1.test

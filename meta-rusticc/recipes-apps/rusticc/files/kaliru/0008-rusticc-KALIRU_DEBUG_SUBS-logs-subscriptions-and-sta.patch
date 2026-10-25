@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sat, 24 Oct 2026 21:10:46 +0300
-Subject: [PATCH 08/14] rusticc: KALIRU_DEBUG_SUBS logs subscriptions and
+Subject: [PATCH 08/20] rusticc: KALIRU_DEBUG_SUBS logs subscriptions and
  status sizes (debugging)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -10,10 +10,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 20 insertions(+)
 
 diff --git a/src/webhooks.rs b/src/webhooks.rs
-index 2151c9f..ac7930a 100644
+index 88f05f0..44382cc 100644
 --- a/src/webhooks.rs
 +++ b/src/webhooks.rs
-@@ -916,6 +916,26 @@ impl QueryStatusHelper {
+@@ -965,6 +965,26 @@ impl QueryStatusHelper {
          for (_, (cconn, sub, template)) in self.clients.borrow().iter() {
              msglist.push((Some(cconn.clone()), sub.clone(), SendFunc::Conn(cconn.clone()), template.clone()));
          }
