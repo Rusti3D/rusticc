@@ -5,6 +5,7 @@
 #   boot logo   recipes-data/opencentauri-bootlogos  480x272 / 532x300 24-bit BMP (Rusti3D)
 #   psplash     recipes-core/psplash                 480x272 PNG
 #   fluidd      recipes-apps/fluidd                  logo SVG, 64x64 icon, 641x72 wordmark
+#   mainsail    recipes-apps/mainsail                sidebar logo SVG, 16/32/180 px icons
 #   python3 branding/make_assets.py
 import base64
 import io
@@ -95,6 +96,13 @@ def main():
 
     letters = white_on_clear(logo.crop(LETTERS))
     write(f"{fluidd}/opencentauri-logo-small.png", save(fit(letters, (641, 72), (255, 255, 255)), "PNG", optimize=True))
+
+    # Mainsail: the theme's sidebar logo (the Fluidd logo SVG) and the icons
+    # in the sizes Mainsail ships (img/icons)
+    mainsail = "recipes-apps/mainsail/files/rusticc-mainsail-theme"
+    write(f"{mainsail}/sidebarLogo-rusticc.svg", svg.encode())
+    for name, size in (("favicon-16x16.png", 16), ("favicon-32x32.png", 32), ("apple-touch-icon-180x180.png", 180)):
+        write(f"{mainsail}/{name}", save(fit(icon, (size, size)), "PNG", optimize=True))
 
 
 if __name__ == "__main__":
