@@ -14,8 +14,11 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
 - [ ] Gaps in Rusticc / kaliru: camera support, "nothing should be breaking on my cc1".
   - Camera: klipper side done (CAMERA_LIGHT_* shell commands, kaliru ce214e3); Moonruster's [webcam] and
     `[server] webcam_redirect` asked of the Moonruster session (2026-10-25).
-  - Python AFC on kaliru with a Canvas (use_python_modules): the plugin layer lacks PrinterPins.setup_pin
-    (+ MCU_digital_out / MCU_pwm) - a genuine kaliru fix (docs/AFC_PORT.md "Found on the way").
+  - Done: kaliru's plugin layer has setup_pin and the MCU pin / endstop classes (81d9fe3, 9981219); patch
+    0023 mirrors COSMOS's modules (drv8833): the python AFC with a Canvas runs on Rusticc, 9/9 identical.
+  - User (2026-10-25): other MMUs use the regular (python) AFC distro for now; the full native AFC port
+    comes once Rusticc checks out on the printer.
+- [ ] Release 0.0.1: the new .swu (rusticc binary, Moonruster 724e081 + patches) on GitHub (user's request).
 
 ## How the code is organised
 
@@ -33,7 +36,7 @@ the host patches 0001-remove-save-config-subfile-check, 0002-reduce-calibration-
 0001-Reduce-log-rotate-threshold, 0001-implement-pulldown-resistor-in-thermistor-calc, 0001-probe-home-z-includes-z-offset,
 0001-force-specific-input-shaper, 0004-allow-config-exclude, and the hx711s/hx717s load cell (0007). The full case set
 (Kalico tests + kaliru cases + Rusticc cases) is 171/172 identical (printers/13 is a known timing case); the CC1
-config and the plugin cases are identical too. The tree is kaliru main a893227 + patches 0001-0022.
+config and the plugin cases are identical too. The tree is kaliru main 9981219 + patches 0001-0023.
 
 `tools/cc1_cmp.sh` runs the user's CC1 config (AFC, AFC_ACE, knock) in batch mode with the printer's own MCU
 dictionaries (`dicts/`). Startup is identical to COSMOS. `CANVAS=1 tools/cc1_cmp.sh cases/cc1_canvas.gcode` runs

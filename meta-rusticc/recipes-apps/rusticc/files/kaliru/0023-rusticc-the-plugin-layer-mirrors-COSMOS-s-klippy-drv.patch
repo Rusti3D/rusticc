@@ -1,0 +1,1233 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sun, 25 Oct 2026 18:16:09 +0200
+Subject: [PATCH 23/23] rusticc: the plugin layer mirrors COSMOS's klippy;
+ drv8833 for python modules
+
+Mirrors generated from the COSMOS reference (Kalico 5b59427 + COSMOS's
+patches): its own modules (drv8833, hx711s, canvas_rfid,
+canvas_filament_sensor) and the ones it patches (klippy APP_NAME,
+queuelogger, thermistor), the existing IDs kept (gen_mirror.py BASE_IDS).
+The native drv8833's drv8833_set_speed / drv8833_move / active / name for
+python modules: the python AFC with an Elegoo Canvas runs on Rusticc.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
+---
+ src/extras/drv8833.rs                         |   2 +-
+ src/plugins/impls/cosmos.rs                   |  20 ++
+ src/plugins/impls/mod.rs                      |   2 +
+ src/plugins/mirror.bin                        | Bin 206990 -> 212864 bytes
+ .../klippy.extras.canvas_filament_sensor.py   | 124 +++++++++
+ .../mirror/klippy.extras.canvas_rfid.py       | 104 +++++++
+ src/plugins/mirror/klippy.extras.drv8833.py   | 216 +++++++++++++++
+ .../mirror/klippy.extras.load_cell.hx711s.py  |  64 +++++
+ .../mirror/klippy.extras.thermistor.py        |   9 +-
+ src/plugins/mirror/klippy.py                  |   2 +-
+ src/plugins/mirror/klippy.queuelogger.py      |  18 +-
+ src/plugins/mirror_ids.rs                     | 261 +++++++++++++++++-
+ tools/gen_mirror.py                           |  20 +-
+ 13 files changed, 820 insertions(+), 22 deletions(-)
+ create mode 100644 src/plugins/impls/cosmos.rs
+ create mode 100644 src/plugins/mirror/klippy.extras.canvas_filament_sensor.py
+ create mode 100644 src/plugins/mirror/klippy.extras.canvas_rfid.py
+ create mode 100644 src/plugins/mirror/klippy.extras.drv8833.py
+ create mode 100644 src/plugins/mirror/klippy.extras.load_cell.hx711s.py
+
+diff --git a/src/extras/drv8833.rs b/src/extras/drv8833.rs
+index dc8ffea..1ed531a 100644
+--- a/src/extras/drv8833.rs
++++ b/src/extras/drv8833.rs
+@@ -541,7 +541,7 @@ pub struct PrinterDrv8833 {
+     reactor: Rc<Reactor>,
+     gcode: Rc<GCodeDispatch>,
+     section_name: String,
+-    name: String,
++    pub name: String,
+     hall_controller: Rc<McuDrv8833Controller>,
+     active: Cell<bool>,
+     manual_mode: Cell<bool>,
+diff --git a/src/plugins/impls/cosmos.rs b/src/plugins/impls/cosmos.rs
+new file mode 100644
+index 0000000..15b546d
+--- /dev/null
++++ b/src/plugins/impls/cosmos.rs
+@@ -0,0 +1,20 @@
++// COSMOS's own klippy modules (Rusticc ports them natively): what python
++// modules call on them. The python AFC drives the Canvas lane motors through
++// drv8833.
++use super::*;
++use crate::extras::drv8833::PrinterDrv8833;
++use crate::ro_attr;
++
++pub fn register(r: &mut Registry) {
++    r.method("klippy.extras.drv8833.PrinterDrv8833.drv8833_set_speed", |a| {
++        a.this::<PrinterDrv8833>()?.drv8833_set_speed(a.f64(0)?)?;
++        Ok(py_none())
++    });
++    // drv8833_move(speed, distance, wait_for_completion=True)
++    r.method("klippy.extras.drv8833.PrinterDrv8833.drv8833_move", |a| {
++        a.this::<PrinterDrv8833>()?.drv8833_move(a.f64(0)?, a.f64(1)?, a.bool(2)?)?;
++        Ok(py_none())
++    });
++    ro_attr!(r, "klippy.extras.drv8833.PrinterDrv8833.active", PrinterDrv8833, |m| m.is_active());
++    ro_attr!(r, "klippy.extras.drv8833.PrinterDrv8833.name", PrinterDrv8833, |m| m.name.clone());
++}
+diff --git a/src/plugins/impls/mod.rs b/src/plugins/impls/mod.rs
+index 68eb90f..cc39d8e 100644
+--- a/src/plugins/impls/mod.rs
++++ b/src/plugins/impls/mod.rs
+@@ -6,6 +6,7 @@ mod accel;
+ mod buttons;
+ mod classes;
+ mod configfile;
++mod cosmos;
+ mod extras_misc;
+ mod extras_state;
+ mod extruder;
+@@ -39,6 +40,7 @@ pub fn register(r: &mut Registry) {
+     extras_state::register(r);
+     extruder::register(r);
+     configfile::register(r);
++    cosmos::register(r);
+     filament_switch_sensor::register(r);
+     gcode::register(r);
+     heaters::register(r);
+diff --git a/src/plugins/mirror.bin b/src/plugins/mirror.bin
+index 4c15386e4fc6c34a8cddb16425bdba03c68a8cf5..c80a6de108e3ff07723852c9bd2f5365ef6746ae 100644
+GIT binary patch
+delta 7451
+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
+Z5)RO=MwGfNC`I@`kBP7Lw^axOIUuG)f5-p;
+
+delta 1582
+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
+
+diff --git a/src/plugins/mirror/klippy.extras.canvas_filament_sensor.py b/src/plugins/mirror/klippy.extras.canvas_filament_sensor.py
+new file mode 100644
+index 0000000..fe43214
+--- /dev/null
++++ b/src/plugins/mirror/klippy.extras.canvas_filament_sensor.py
+@@ -0,0 +1,124 @@
++# kaliru plugin layer: mirror of Kalico klippy.extras.canvas_filament_sensor (generated by tools/gen_mirror.py)
++import _k
++
++FRAME_START = 61
++FRAME_MARKER = 128
++HEADER_LEN = 4
++FRAME_OVERHEAD = HEADER_LEN + 2
++MIN_FRAME_LEN = FRAME_OVERHEAD + 2
++CRC8_POLY, CRC8_INIT = (57, 102)
++CRC16_POLY, CRC16_INIT = (4129, 37181)
++DEVICE_ID = 5
++CMD_VERSION = 2
++CMD_STATUS = 126
++RETRY_TIME = 5.0
++EDGE_MASK = 4294967295
++PINS = ('filament', 'encoder')
++
++def crc8(data, crc=CRC8_INIT):
++    return _k.fcall(7489, data, crc)
++
++def crc16(data, crc=CRC16_INIT):
++    return _k.fcall(7490, data, crc)
++
++def build_frame(payload):
++    return _k.fcall(7491, payload)
++
++class FrameParser(_k.Object):
++    __kaliru_mirror__ = True
++    def __init__(self):
++        _k.new(self, 7492)
++    def feed(self, data):
++        return _k.call(self, 7493, data)
++    buf = _k.Attr(7494, 'buf')
++    errors = _k.Attr(7495, 'errors')
++
++class _Command(_k.Object):
++    __kaliru_mirror__ = True
++    def __init__(self, handler):
++        _k.new(self, 7496, handler)
++    def send(self, data=(), minclock=0, reqclock=0):
++        return _k.call(self, 7497, data, minclock, reqclock)
++    handler = _k.Attr(7498, 'handler')
++
++class CanvasFilamentSensor(_k.Object):
++    __kaliru_mirror__ = True
++    def __init__(self, config):
++        _k.new(self, 7499, config)
++    def _connect(self):
++        return _k.call(self, 7500)
++    def _handle_ready(self):
++        return _k.call(self, 7501)
++    def _handle_disconnect(self):
++        return _k.call(self, 7502)
++    def setup_pin(self, pin_type, pin_params):
++        return _k.call(self, 7503, pin_type, pin_params)
++    def register_config_callback(self, cb):
++        return _k.call(self, 7504, cb)
++    def create_oid(self):
++        return _k.call(self, 7505)
++    def add_config_cmd(self, cmd, is_init=False, on_restart=False):
++        return _k.call(self, 7506, cmd, is_init, on_restart)
++    def alloc_command_queue(self):
++        return _k.call(self, 7507)
++    def lookup_command(self, msgformat, cq=None):
++        return _k.call(self, 7508, msgformat, cq)
++    def get_query_slot(self, oid):
++        return _k.call(self, 7509, oid)
++    def seconds_to_clock(self, time):
++        return _k.call(self, 7510, time)
++    def register_response(self, cb, msg, oid=None):
++        return _k.call(self, 7511, cb, msg, oid)
++    def _handle_ack(self, data):
++        return _k.call(self, 7512, data)
++    def _open(self):
++        return _k.call(self, 7513)
++    def _close(self):
++        return _k.call(self, 7514)
++    def _io_error(self, eventtime, err):
++        return _k.call(self, 7515, eventtime, err)
++    def _poll_event(self, eventtime):
++        return _k.call(self, 7516, eventtime)
++    def _handle_read(self, eventtime):
++        return _k.call(self, 7517, eventtime)
++    def _process_payload(self, eventtime, payload):
++        return _k.call(self, 7518, eventtime, payload)
++    def _set_disconnected(self, eventtime):
++        return _k.call(self, 7519, eventtime)
++    def _update_pins(self, eventtime, present, edges):
++        return _k.call(self, 7520, eventtime, present, edges)
++    def get_status(self, eventtime):
++        return _k.call(self, 7521, eventtime)
++    awaiting_reply = _k.Attr(7522, 'awaiting_reply')
++    baud = _k.Attr(7523, 'baud')
++    chip_name = _k.Attr(7524, 'chip_name')
++    config_callbacks = _k.Attr(7525, 'config_callbacks')
++    connected = _k.Attr(7526, 'connected')
++    device_id = _k.Attr(7527, 'device_id')
++    edges = _k.Attr(7528, 'edges')
++    fd_handle = _k.Attr(7529, 'fd_handle')
++    groups = _k.Attr(7530, 'groups')
++    last_edges = _k.Attr(7531, 'last_edges')
++    levels = _k.Attr(7532, 'levels')
++    max_missed = _k.Attr(7533, 'max_missed')
++    missed = _k.Attr(7534, 'missed')
++    next_oid = _k.Attr(7535, 'next_oid')
++    open_error = _k.Attr(7536, 'open_error')
++    parser = _k.Attr(7537, 'parser')
++    pin_error = _k.Attr(7538, 'pin_error')
++    poll_interval = _k.Attr(7539, 'poll_interval')
++    poll_timer = _k.Attr(7540, 'poll_timer')
++    present = _k.Attr(7541, 'present')
++    printer = _k.Attr(7542, 'printer')
++    reactor = _k.Attr(7543, 'reactor')
++    runout_on_disconnect = _k.Attr(7544, 'runout_on_disconnect')
++    ser = _k.Attr(7545, 'ser')
++    serial_port = _k.Attr(7546, 'serial_port')
++    version = _k.Attr(7547, 'version')
++    want_version = _k.Attr(7548, 'want_version')
++
++def load_config(config):
++    return _k.fcall(7549, config)
++
++
++__getattr__ = _k.module_getattr(__name__)
+diff --git a/src/plugins/mirror/klippy.extras.canvas_rfid.py b/src/plugins/mirror/klippy.extras.canvas_rfid.py
+new file mode 100644
+index 0000000..e437d7b
+--- /dev/null
++++ b/src/plugins/mirror/klippy.extras.canvas_rfid.py
+@@ -0,0 +1,104 @@
++# kaliru plugin layer: mirror of Kalico klippy.extras.canvas_rfid (generated by tools/gen_mirror.py)
++import _k
++
++FRAME_ADDR = 160
++CLS_MODULE, CLS_NTAG = (1, 3)
++CMD_MODULE_INFO, CMD_HOT_START, CMD_TAG_ID = (1, 3, 6)
++CMD_IDENTIFY_PAGE = 9
++CMD_MULTI_PAGE_READ = 6
++STATUS_OK, STATUS_NO_TAG = (0, 1)
++REPLY_OVERHEAD = 8
++MAX_READ_PAGES = 11
++PAGE_COUNTS_BY_CC_SIZE = {6: 16, 18: 45, 62: 135, 109: 231}
++DEFAULT_LAST_PAGE = 44
++READ_RETRY_TIME = 5.0
++ELEGOO_MAGIC = bytes((54, 238, 238, 238))
++PROCESSORS = {'elegoo': ('tag.elegoo.processor', 'ElegooTagProcessor'), 'tigertag': ('tag.tigertag.processor', 'TigerTagProcessor'), 'openspool': ('tag.openspool.processor', 'OpenspoolTagProcessor'), 'opentag3d': ('tag.opentag3d.processor', 'OpenTag3DTagProcessor'), 'spoolease': ('tag.spoolease.processor', 'SpooleaseTagProcessor'), 'anycubic': ('tag.anycubic.processor', 'AnycubicTagProcessor')}
++
++def xor8(data):
++    return _k.fcall(7550, data)
++
++def build_frame(cls, cmd, data=b"", seq=0):
++    return _k.fcall(7551, cls, cmd, data, seq)
++
++def parse_reply(frame, rx):
++    return _k.fcall(7552, frame, rx)
++
++def tag_last_page(head):
++    return _k.fcall(7553, head)
++
++class OpenRFID(_k.Object):
++    __kaliru_mirror__ = True
++    def __init__(self, path, names):
++        _k.new(self, 7554, path, names)
++    def identify(self, uid, data):
++        return _k.call(self, 7555, uid, data)
++    ScanResult = _k.Attr(7556, 'ScanResult')
++    processors = _k.Attr(7557, 'processors')
++    ultralight = _k.Attr(7558, 'ultralight')
++
++class CanvasRFID(_k.Object):
++    __kaliru_mirror__ = True
++    def __init__(self, config):
++        _k.new(self, 7559, config)
++    def _handle_ready(self):
++        return _k.call(self, 7560)
++    def _transact(self, cls, cmd, data=b"", rxlen=24):
++        return _k.call(self, 7561, cls, cmd, data, rxlen)
++    def _read_pages(self, start, end):
++        return _k.call(self, 7562, start, end)
++    def _read_tag(self):
++        return _k.call(self, 7563)
++    def _init_module(self):
++        return _k.call(self, 7564)
++    def _read_module_info(self):
++        return _k.call(self, 7565)
++    def _poll_event(self, eventtime):
++        return _k.call(self, 7566, eventtime)
++    def _describe(self):
++        return _k.call(self, 7567)
++    def _respond(self, msg):
++        return _k.call(self, 7568, msg)
++    def _run_tag_gcode(self, eventtime):
++        return _k.call(self, 7569, eventtime)
++    def get_status(self, eventtime):
++        return _k.call(self, 7570, eventtime)
++    cmd_QUERY_CANVAS_RFID_help = 'Report the spool tag on a Canvas RFID reader'
++    def cmd_QUERY_CANVAS_RFID(self, gcmd):
++        return _k.call(self, 7571, gcmd)
++    cmd_CANVAS_RFID_DUMP_help = 'Dump the pages of the tag on a Canvas reader'
++    def cmd_CANVAS_RFID_DUMP(self, gcmd):
++        return _k.call(self, 7572, gcmd)
++    errors = _k.Attr(7573, 'errors')
++    failed_uid = _k.Attr(7574, 'failed_uid')
++    failed_until = _k.Attr(7575, 'failed_until')
++    filament = _k.Attr(7576, 'filament')
++    gcode_macro = _k.Attr(7577, 'gcode_macro')
++    i2c = _k.Attr(7578, 'i2c')
++    init_module = _k.Attr(7579, 'init_module')
++    initialized = _k.Attr(7580, 'initialized')
++    lock = _k.Attr(7581, 'lock')
++    max_pages = _k.Attr(7582, 'max_pages')
++    name = _k.Attr(7583, 'name')
++    openrfid = _k.Attr(7584, 'openrfid')
++    poll_interval = _k.Attr(7585, 'poll_interval')
++    poll_timer = _k.Attr(7586, 'poll_timer')
++    poll_while_printing = _k.Attr(7587, 'poll_while_printing')
++    print_stats = _k.Attr(7588, 'print_stats')
++    printer = _k.Attr(7589, 'printer')
++    reactor = _k.Attr(7590, 'reactor')
++    reply_delay = _k.Attr(7591, 'reply_delay')
++    retries = _k.Attr(7592, 'retries')
++    scan_id = _k.Attr(7593, 'scan_id')
++    scan_time = _k.Attr(7594, 'scan_time')
++    seq = _k.Attr(7595, 'seq')
++    tag_gcode = _k.Attr(7596, 'tag_gcode')
++    uid = _k.Attr(7597, 'uid')
++    use_seq = _k.Attr(7598, 'use_seq')
++    version = _k.Attr(7599, 'version')
++
++def load_config_prefix(config):
++    return _k.fcall(7600, config)
++
++
++__getattr__ = _k.module_getattr(__name__)
+diff --git a/src/plugins/mirror/klippy.extras.drv8833.py b/src/plugins/mirror/klippy.extras.drv8833.py
+new file mode 100644
+index 0000000..5ea9934
+--- /dev/null
++++ b/src/plugins/mirror/klippy.extras.drv8833.py
+@@ -0,0 +1,216 @@
++# kaliru plugin layer: mirror of Kalico klippy.extras.drv8833 (generated by tools/gen_mirror.py)
++import _k
++
++HALL_POLL_TIME = 0.001
++CONTROL_INTERVAL = 0.01
++MCU_REPORT_INTERVAL = 0.05
++DEBUG_LOG_INTERVAL = 0.5
++DEFAULT_DUTY = 50.0
++MAX_DUTY_STEP = 4.0
++DEFAULT_PID_KP = 1.2
++DEFAULT_PID_KI = 0.8
++DEFAULT_PID_KD = 0.02
++HALL_RESOLUTION_SCALE = 1000000
++SPEED_SCALE = 1000
++DUTY_SCALE = 10
++PID_PARAM_SCALE = 1000
++AUTOTUNE_SETTLE_TIME = 0.8
++AUTOTUNE_SAMPLE_TIME = 0.4
++AUTOTUNE_BAND_RATIO = 0.05
++AUTOTUNE_MIN_BAND = 1.0
++AUTOTUNE_RELAY_RATIO = 0.15
++AUTOTUNE_MIN_RELAY_DUTY = 4.0
++AUTOTUNE_MAX_RELAY_DUTY = 20.0
++AUTOTUNE_BASELINE_STEPS = 6
++AUTOTUNE_REQUIRED_PAIRS = 3
++AUTOTUNE_TIMEOUT = 45.0
++
++def _clamp(value, min_value, max_value):
++    return _k.fcall(7601, value, min_value, max_value)
++
++class Drv8833Interface(_k.Object):
++    __kaliru_mirror__ = True
++    def drv8833_set_speed(self, speed):
++        return _k.call(self, 7602, speed)
++    def drv8833_move(self, speed, distance):
++        return _k.call(self, 7603, speed, distance)
++
++class MCUDrv8833Controller(_k.Object):
++    __kaliru_mirror__ = True
++    def __init__(self, config, motor_fwd_params, motor_rwd_params, hall_params):
++        _k.new(self, 7604, config, motor_fwd_params, motor_rwd_params, hall_params)
++    def _pid_to_mcu(self, value):
++        return _k.call(self, 7605, value)
++    def _build_config(self):
++        return _k.call(self, 7606)
++    def _handle_status(self, params):
++        return _k.call(self, 7607, params)
++    def start(self, direction, target_speed):
++        return _k.call(self, 7608, direction, target_speed)
++    def start_move(self, direction, target_speed, stop_ticks):
++        return _k.call(self, 7609, direction, target_speed, stop_ticks)
++    def manual_start(self, direction, duty_cycle):
++        return _k.call(self, 7610, direction, duty_cycle)
++    def set_pid(self, kp, ki, kd):
++        return _k.call(self, 7611, kp, ki, kd)
++    def stop(self):
++        return _k.call(self, 7612)
++    _manual_cmd = _k.Attr(7613, '_manual_cmd')
++    _set_cmd = _k.Attr(7614, '_set_cmd')
++    _set_pid_cmd = _k.Attr(7615, '_set_pid_cmd')
++    cycle_time = _k.Attr(7616, 'cycle_time')
++    default_duty = _k.Attr(7617, 'default_duty')
++    hall_pin = _k.Attr(7618, 'hall_pin')
++    hall_pullup = _k.Attr(7619, 'hall_pullup')
++    hall_resolution = _k.Attr(7620, 'hall_resolution')
++    last_active = _k.Attr(7621, 'last_active')
++    last_count = _k.Attr(7622, 'last_count')
++    last_duty_cycle = _k.Attr(7623, 'last_duty_cycle')
++    last_manual = _k.Attr(7624, 'last_manual')
++    last_speed_mm_s = _k.Attr(7625, 'last_speed_mm_s')
++    last_status_time = _k.Attr(7626, 'last_status_time')
++    max_duty_step = _k.Attr(7627, 'max_duty_step')
++    mcu = _k.Attr(7628, 'mcu')
++    motor_fwd_pin = _k.Attr(7629, 'motor_fwd_pin')
++    motor_rwd_pin = _k.Attr(7630, 'motor_rwd_pin')
++    oid = _k.Attr(7631, 'oid')
++    pid_kd = _k.Attr(7632, 'pid_kd')
++    pid_ki = _k.Attr(7633, 'pid_ki')
++    pid_kp = _k.Attr(7634, 'pid_kp')
++    printer = _k.Attr(7635, 'printer')
++    reactor = _k.Attr(7636, 'reactor')
++    status_callback = _k.Attr(7637, 'status_callback')
++    status_sequence = _k.Attr(7638, 'status_sequence')
++
++class Drv8833PIDAutoTune(_k.Object):
++    __kaliru_mirror__ = True
++    def __init__(self, lane, gcmd):
++        _k.new(self, 7639, lane, gcmd)
++    def _pause(self, duration):
++        return _k.call(self, 7640, duration)
++    def _wait_for_status(self, timeout=1.0):
++        return _k.call(self, 7641, timeout)
++    def _measure_speed(self, duty_cycle):
++        return _k.call(self, 7642, duty_cycle)
++    def _find_baseline_duty(self):
++        return _k.call(self, 7643)
++    def _check_peak(self, sample_time, speed, target):
++        return _k.call(self, 7644, sample_time, speed, target)
++    def _collect_relay_response(self, low_duty, high_duty):
++        return _k.call(self, 7645, low_duty, high_duty)
++    def _get_peak_pairs(self):
++        return _k.call(self, 7646)
++    def _calc_pid(self, relay_duty, pairs):
++        return _k.call(self, 7647, relay_duty, pairs)
++    def write_file_data(self, filename):
++        return _k.call(self, 7648, filename)
++    def run(self):
++        return _k.call(self, 7649)
++    band = _k.Attr(7650, 'band')
++    controller = _k.Attr(7651, 'controller')
++    data = _k.Attr(7652, 'data')
++    direction = _k.Attr(7653, 'direction')
++    eventtime = _k.Attr(7654, 'eventtime')
++    gcmd = _k.Attr(7655, 'gcmd')
++    lane = _k.Attr(7656, 'lane')
++    peaks = _k.Attr(7657, 'peaks')
++    reactor = _k.Attr(7658, 'reactor')
++    sample_time = _k.Attr(7659, 'sample_time')
++    settle_time = _k.Attr(7660, 'settle_time')
++    switch_times = _k.Attr(7661, 'switch_times')
++    target_speed = _k.Attr(7662, 'target_speed')
++    timeout = _k.Attr(7663, 'timeout')
++    write_file = _k.Attr(7664, 'write_file')
++
++class Drv8833CommandHelper(_k.Object):
++    __kaliru_mirror__ = True
++    cmd_MOVE_DEBUG_help = 'Run a timed DRV8833 debug move'
++    cmd_DRV_SET_SPEED_help = 'Set DRV8833 speed in mm/s'
++    cmd_DRV_MOVE_help = 'Run a DRV8833 move for a target distance in mm'
++    cmd_DRV8833_PID_TUNE_help = 'Run relay autotune for DRV8833 PID gains'
++    cmd_SET_DRV8833_PID_help = 'Update DRV8833 PID gains'
++    def __init__(self, printer):
++        _k.new(self, 7665, printer)
++    def _lookup_lane(self, gcmd):
++        return _k.call(self, 7666, gcmd)
++    def cmd_MOVE_DEBUG(self, gcmd):
++        return _k.call(self, 7667, gcmd)
++    def cmd_DRV_SET_SPEED(self, gcmd):
++        return _k.call(self, 7668, gcmd)
++    def cmd_DRV_MOVE(self, gcmd):
++        return _k.call(self, 7669, gcmd)
++    def cmd_DRV8833_PID_TUNE(self, gcmd):
++        return _k.call(self, 7670, gcmd)
++    def cmd_SET_DRV8833_PID(self, gcmd):
++        return _k.call(self, 7671, gcmd)
++    gcode = _k.Attr(7672, 'gcode')
++    printer = _k.Attr(7673, 'printer')
++
++class PrinterDrv8833(Drv8833Interface):
++    __kaliru_mirror__ = True
++    def __init__(self, config):
++        _k.new(self, 7674, config)
++    def get_status(self, eventtime):
++        return _k.call(self, 7675, eventtime)
++    def _handle_request_restart(self, print_time):
++        return _k.call(self, 7676, print_time)
++    def _handle_stop(self):
++        return _k.call(self, 7677)
++    def _handle_hall_status(self):
++        return _k.call(self, 7678)
++    def _start(self, eventtime, direction, target_speed):
++        return _k.call(self, 7679, eventtime, direction, target_speed)
++    def _start_move(self, eventtime, direction, target_speed, stop_ticks):
++        return _k.call(self, 7680, eventtime, direction, target_speed, stop_ticks)
++    def _start_manual(self, eventtime, direction, duty_cycle):
++        return _k.call(self, 7681, eventtime, direction, duty_cycle)
++    def _stop(self, eventtime):
++        return _k.call(self, 7682, eventtime)
++    def _save_pid_gains(self, kp, ki, kd):
++        return _k.call(self, 7683, kp, ki, kd)
++    def set_pid_gains(self, kp, ki, kd, save_to_config=False):
++        return _k.call(self, 7684, kp, ki, kd, save_to_config)
++    def _get_debug_totals(self):
++        return _k.call(self, 7685)
++    def _wait_for_move_complete(self, eventtime):
++        return _k.call(self, 7686, eventtime)
++    def _format_debug_message(self, eventtime):
++        return _k.call(self, 7687, eventtime)
++    def drv8833_set_speed(self, speed):
++        return _k.call(self, 7688, speed)
++    def drv8833_move(self, speed, distance, wait_for_completion=True):
++        return _k.call(self, 7689, speed, distance, wait_for_completion)
++    cmd_MOVE_DEBUG_help = 'Run the DRV8833 lane for a fixed time while logging hall counts, hall speed, and duty cycle'
++    cmd_DRV_SET_SPEED_help = 'Set the DRV8833 lane speed in mm/s'
++    cmd_DRV_MOVE_help = 'Run the DRV8833 lane for a target distance in mm'
++    def cmd_MOVE_DEBUG(self, gcmd):
++        return _k.call(self, 7690, gcmd)
++    def cmd_DRV_SET_SPEED(self, gcmd):
++        return _k.call(self, 7691, gcmd)
++    def cmd_DRV_MOVE(self, gcmd):
++        return _k.call(self, 7692, gcmd)
++    def cmd_SET_DRV8833_PID(self, gcmd):
++        return _k.call(self, 7693, gcmd)
++    def cmd_DRV8833_PID_TUNE(self, gcmd):
++        return _k.call(self, 7694, gcmd)
++    active = _k.Attr(7695, 'active')
++    debug_gcmd = _k.Attr(7696, 'debug_gcmd')
++    debug_hall_start = _k.Attr(7697, 'debug_hall_start')
++    debug_next_log_time = _k.Attr(7698, 'debug_next_log_time')
++    direction = _k.Attr(7699, 'direction')
++    direction_name = _k.Attr(7700, 'direction_name')
++    gcode = _k.Attr(7701, 'gcode')
++    hall_controller = _k.Attr(7702, 'hall_controller')
++    manual_mode = _k.Attr(7703, 'manual_mode')
++    mcu = _k.Attr(7704, 'mcu')
++    name = _k.Attr(7705, 'name')
++    printer = _k.Attr(7706, 'printer')
++    reactor = _k.Attr(7707, 'reactor')
++    section_name = _k.Attr(7708, 'section_name')
++    target_speed = _k.Attr(7709, 'target_speed')
++
++def load_config_prefix(config):
++    return _k.fcall(7710, config)
++
++
++__getattr__ = _k.module_getattr(__name__)
+diff --git a/src/plugins/mirror/klippy.extras.load_cell.hx711s.py b/src/plugins/mirror/klippy.extras.load_cell.hx711s.py
+new file mode 100644
+index 0000000..39996ff
+--- /dev/null
++++ b/src/plugins/mirror/klippy.extras.load_cell.hx711s.py
+@@ -0,0 +1,64 @@
++# kaliru plugin layer: mirror of Kalico klippy.extras.load_cell.hx711s (generated by tools/gen_mirror.py)
++import _k
++from .interfaces import LoadCellSensor
++
++UPDATE_INTERVAL = 0.1
++SAMPLE_ERROR_DESYNC = -2147483648
++SAMPLE_ERROR_LONG_READ = 1073741824
++
++class HX711SBase(LoadCellSensor):
++    __kaliru_mirror__ = True
++    def __init__(self, config, sensor_type, sample_rate_options, default_sample_rate, gain_options, default_gain):
++        _k.new(self, 7711, config, sensor_type, sample_rate_options, default_sample_rate, gain_options, default_gain)
++    def _build_config(self):
++        return _k.call(self, 7712)
++    def get_mcu(self):
++        return _k.call(self, 7713)
++    def get_samples_per_second(self):
++        return _k.call(self, 7714)
++    def get_range(self):
++        return _k.call(self, 7715)
++    def get_channel_count(self):
++        return _k.call(self, 7716)
++    def add_client(self, callback):
++        return _k.call(self, 7717, callback)
++    def attach_load_cell_probe(self, load_cell_probe_oid):
++        return _k.call(self, 7718, load_cell_probe_oid)
++    def _convert_samples(self, samples):
++        return _k.call(self, 7719, samples)
++    def _start_measurements(self):
++        return _k.call(self, 7720)
++    def _finish_measurements(self):
++        return _k.call(self, 7721)
++    def _process_batch(self, eventtime):
++        return _k.call(self, 7722, eventtime)
++    attach_probe_cmd = _k.Attr(7723, 'attach_probe_cmd')
++    batch_bulk = _k.Attr(7724, 'batch_bulk')
++    consecutive_fails = _k.Attr(7725, 'consecutive_fails')
++    dout_pins = _k.Attr(7726, 'dout_pins')
++    ffreader = _k.Attr(7727, 'ffreader')
++    gain_channel = _k.Attr(7728, 'gain_channel')
++    last_error_count = _k.Attr(7729, 'last_error_count')
++    mcu = _k.Attr(7730, 'mcu')
++    name = _k.Attr(7731, 'name')
++    oid = _k.Attr(7732, 'oid')
++    printer = _k.Attr(7733, 'printer')
++    query_hx711s_cmd = _k.Attr(7734, 'query_hx711s_cmd')
++    sclk_pins = _k.Attr(7735, 'sclk_pins')
++    sensor_count = _k.Attr(7736, 'sensor_count')
++    sensor_type = _k.Attr(7737, 'sensor_type')
++    sps = _k.Attr(7738, 'sps')
++
++class HX711S(HX711SBase):
++    __kaliru_mirror__ = True
++    def __init__(self, config):
++        _k.new(self, 7739, config)
++
++class HX717S(HX711SBase):
++    __kaliru_mirror__ = True
++    def __init__(self, config):
++        _k.new(self, 7740, config)
++
++HX711S_SENSOR_TYPES = {'hx711s': HX711S, 'hx717s': HX717S}
++
++__getattr__ = _k.module_getattr(__name__)
+diff --git a/src/plugins/mirror/klippy.extras.thermistor.py b/src/plugins/mirror/klippy.extras.thermistor.py
+index 18f0dbb..35b4e6c 100644
+--- a/src/plugins/mirror/klippy.extras.thermistor.py
++++ b/src/plugins/mirror/klippy.extras.thermistor.py
+@@ -5,12 +5,16 @@ KELVIN_TO_CELSIUS = -273.15
+ 
+ class Thermistor(_k.Object):
+     __kaliru_mirror__ = True
+-    def __init__(self, pullup, inline_resistor):
+-        _k.new(self, 5059, pullup, inline_resistor)
++    def __init__(self, pullup, inline_resistor, pulldown_resistor):
++        _k.new(self, 5059, pullup, inline_resistor, pulldown_resistor)
+     def setup_coefficients(self, t1, r1, t2, r2, t3, r3, name=""):
+         return _k.call(self, 5060, t1, r1, t2, r2, t3, r3, name)
+     def setup_coefficients_beta(self, t1, r1, beta):
+         return _k.call(self, 5061, t1, r1, beta)
++    def _remove_pulldown(self, r):
++        return _k.call(self, 7741, r)
++    def _apply_pulldown(self, r):
++        return _k.call(self, 7742, r)
+     def calc_temp(self, adc):
+         return _k.call(self, 5062, adc)
+     def calc_adc(self, temp):
+@@ -19,6 +23,7 @@ class Thermistor(_k.Object):
+     c2 = _k.Attr(5065, 'c2')
+     c3 = _k.Attr(5066, 'c3')
+     inline_resistor = _k.Attr(5067, 'inline_resistor')
++    pulldown_resistor = _k.Attr(7743, 'pulldown_resistor')
+     pullup = _k.Attr(5068, 'pullup')
+ 
+ def PrinterThermistor(config, params):
+diff --git a/src/plugins/mirror/klippy.py b/src/plugins/mirror/klippy.py
+index 28d5e68..be025d3 100644
+--- a/src/plugins/mirror/klippy.py
++++ b/src/plugins/mirror/klippy.py
+@@ -2,7 +2,7 @@
+ import _k
+ from .printer import *
+ 
+-APP_NAME = 'Kalico'
++APP_NAME = 'Rusticc'
+ 
+ 
+ __getattr__ = _k.module_getattr(__name__)
+diff --git a/src/plugins/mirror/klippy.queuelogger.py b/src/plugins/mirror/klippy.queuelogger.py
+index 71e7bb2..ea25f7f 100644
+--- a/src/plugins/mirror/klippy.queuelogger.py
++++ b/src/plugins/mirror/klippy.queuelogger.py
+@@ -22,16 +22,11 @@ class QueueHandler(logging.Handler):
+         except Exception:
+             self.handleError(record)
+ 
+-class QueueListener(logging.handlers.TimedRotatingFileHandler):
++class QueueListener(logging.handlers.RotatingFileHandler):
+     def __init__(self, filename, rotate_log_at_restart):
+-        if rotate_log_at_restart:
+-            logging.handlers.TimedRotatingFileHandler.__init__(
+-                self, filename, when="S", interval=60 * 60 * 24, backupCount=5
+-            )
+-        else:
+-            logging.handlers.TimedRotatingFileHandler.__init__(
+-                self, filename, when="midnight", backupCount=5
+-            )
++        logging.handlers.RotatingFileHandler.__init__(
++            self, filename, maxBytes=5 * 1024 * 1024, backupCount=2
++        )
+         self.bg_queue = queue.Queue()
+         self.bg_thread = threading.Thread(target=self._bg_thread)
+         self.bg_thread.start()
+@@ -58,10 +53,7 @@ class QueueListener(logging.handlers.TimedRotatingFileHandler):
+         self.rollover_info.clear()
+ 
+     def doRollover(self):
+-        before = self.rolloverAt
+-        logging.handlers.TimedRotatingFileHandler.doRollover(self)
+-        if self.rolloverAt <= before:
+-            return
++        logging.handlers.RotatingFileHandler.doRollover(self)
+         lines = [
+             self.rollover_info[name] for name in sorted(self.rollover_info)
+         ]
+diff --git a/src/plugins/mirror_ids.rs b/src/plugins/mirror_ids.rs
+index 007db0d..fd04cb3 100644
+--- a/src/plugins/mirror_ids.rs
++++ b/src/plugins/mirror_ids.rs
+@@ -1,4 +1,4 @@
+-// generated by tools/gen_mirror.py from Kalico 5b594279: do not edit
++// generated by tools/gen_mirror.py from Kalico 5b594279 with patches: do not edit
+ /// mirrored module names; true = a package
+ pub static MODULES: &[(&str, bool)] = &[
+     ("klippy", true),
+@@ -27,6 +27,8 @@ pub static MODULES: &[(&str, bool)] = &[
+     ("klippy.extras.buttons", false),
+     ("klippy.extras.canbus_ids", false),
+     ("klippy.extras.canbus_stats", false),
++    ("klippy.extras.canvas_filament_sensor", false),
++    ("klippy.extras.canvas_rfid", false),
+     ("klippy.extras.control_mpc", false),
+     ("klippy.extras.controller_fan", false),
+     ("klippy.extras.dac084S085", false),
+@@ -46,6 +48,7 @@ pub static MODULES: &[(&str, bool)] = &[
+     ("klippy.extras.display_status", false),
+     ("klippy.extras.dockable_probe", false),
+     ("klippy.extras.dotstar", false),
++    ("klippy.extras.drv8833", false),
+     ("klippy.extras.ds18b20", false),
+     ("klippy.extras.duplicate_pin_override", false),
+     ("klippy.extras.endstop_phase", false),
+@@ -93,6 +96,7 @@ pub static MODULES: &[(&str, bool)] = &[
+     ("klippy.extras.load_cell.ads1220", false),
+     ("klippy.extras.load_cell.ads131m0x", false),
+     ("klippy.extras.load_cell.cs1237", false),
++    ("klippy.extras.load_cell.hx711s", false),
+     ("klippy.extras.load_cell.hx71x", false),
+     ("klippy.extras.load_cell.interfaces", false),
+     ("klippy.extras.load_cell.load_cell", false),
+@@ -7702,4 +7706,259 @@ pub static IDS: &[&str] = &[
+     "klippy.webhooks.QueryStatusHelper.printer",
+     "klippy.webhooks.QueryStatusHelper.query_timer",
+     "klippy.webhooks.add_early_printer_objects",
++    "klippy.extras.canvas_filament_sensor.crc8",
++    "klippy.extras.canvas_filament_sensor.crc16",
++    "klippy.extras.canvas_filament_sensor.build_frame",
++    "klippy.extras.canvas_filament_sensor.FrameParser.__init__",
++    "klippy.extras.canvas_filament_sensor.FrameParser.feed",
++    "klippy.extras.canvas_filament_sensor.FrameParser.buf",
++    "klippy.extras.canvas_filament_sensor.FrameParser.errors",
++    "klippy.extras.canvas_filament_sensor._Command.__init__",
++    "klippy.extras.canvas_filament_sensor._Command.send",
++    "klippy.extras.canvas_filament_sensor._Command.handler",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.__init__",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._connect",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._handle_ready",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._handle_disconnect",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.setup_pin",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.register_config_callback",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.create_oid",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.add_config_cmd",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.alloc_command_queue",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.lookup_command",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.get_query_slot",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.seconds_to_clock",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.register_response",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._handle_ack",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._open",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._close",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._io_error",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._poll_event",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._handle_read",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._process_payload",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._set_disconnected",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor._update_pins",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.get_status",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.awaiting_reply",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.baud",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.chip_name",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.config_callbacks",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.connected",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.device_id",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.edges",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.fd_handle",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.groups",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.last_edges",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.levels",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.max_missed",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.missed",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.next_oid",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.open_error",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.parser",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.pin_error",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.poll_interval",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.poll_timer",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.present",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.printer",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.reactor",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.runout_on_disconnect",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.ser",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.serial_port",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.version",
++    "klippy.extras.canvas_filament_sensor.CanvasFilamentSensor.want_version",
++    "klippy.extras.canvas_filament_sensor.load_config",
++    "klippy.extras.canvas_rfid.xor8",
++    "klippy.extras.canvas_rfid.build_frame",
++    "klippy.extras.canvas_rfid.parse_reply",
++    "klippy.extras.canvas_rfid.tag_last_page",
++    "klippy.extras.canvas_rfid.OpenRFID.__init__",
++    "klippy.extras.canvas_rfid.OpenRFID.identify",
++    "klippy.extras.canvas_rfid.OpenRFID.ScanResult",
++    "klippy.extras.canvas_rfid.OpenRFID.processors",
++    "klippy.extras.canvas_rfid.OpenRFID.ultralight",
++    "klippy.extras.canvas_rfid.CanvasRFID.__init__",
++    "klippy.extras.canvas_rfid.CanvasRFID._handle_ready",
++    "klippy.extras.canvas_rfid.CanvasRFID._transact",
++    "klippy.extras.canvas_rfid.CanvasRFID._read_pages",
++    "klippy.extras.canvas_rfid.CanvasRFID._read_tag",
++    "klippy.extras.canvas_rfid.CanvasRFID._init_module",
++    "klippy.extras.canvas_rfid.CanvasRFID._read_module_info",
++    "klippy.extras.canvas_rfid.CanvasRFID._poll_event",
++    "klippy.extras.canvas_rfid.CanvasRFID._describe",
++    "klippy.extras.canvas_rfid.CanvasRFID._respond",
++    "klippy.extras.canvas_rfid.CanvasRFID._run_tag_gcode",
++    "klippy.extras.canvas_rfid.CanvasRFID.get_status",
++    "klippy.extras.canvas_rfid.CanvasRFID.cmd_QUERY_CANVAS_RFID",
++    "klippy.extras.canvas_rfid.CanvasRFID.cmd_CANVAS_RFID_DUMP",
++    "klippy.extras.canvas_rfid.CanvasRFID.errors",
++    "klippy.extras.canvas_rfid.CanvasRFID.failed_uid",
++    "klippy.extras.canvas_rfid.CanvasRFID.failed_until",
++    "klippy.extras.canvas_rfid.CanvasRFID.filament",
++    "klippy.extras.canvas_rfid.CanvasRFID.gcode_macro",
++    "klippy.extras.canvas_rfid.CanvasRFID.i2c",
++    "klippy.extras.canvas_rfid.CanvasRFID.init_module",
++    "klippy.extras.canvas_rfid.CanvasRFID.initialized",
++    "klippy.extras.canvas_rfid.CanvasRFID.lock",
++    "klippy.extras.canvas_rfid.CanvasRFID.max_pages",
++    "klippy.extras.canvas_rfid.CanvasRFID.name",
++    "klippy.extras.canvas_rfid.CanvasRFID.openrfid",
++    "klippy.extras.canvas_rfid.CanvasRFID.poll_interval",
++    "klippy.extras.canvas_rfid.CanvasRFID.poll_timer",
++    "klippy.extras.canvas_rfid.CanvasRFID.poll_while_printing",
++    "klippy.extras.canvas_rfid.CanvasRFID.print_stats",
++    "klippy.extras.canvas_rfid.CanvasRFID.printer",
++    "klippy.extras.canvas_rfid.CanvasRFID.reactor",
++    "klippy.extras.canvas_rfid.CanvasRFID.reply_delay",
++    "klippy.extras.canvas_rfid.CanvasRFID.retries",
++    "klippy.extras.canvas_rfid.CanvasRFID.scan_id",
++    "klippy.extras.canvas_rfid.CanvasRFID.scan_time",
++    "klippy.extras.canvas_rfid.CanvasRFID.seq",
++    "klippy.extras.canvas_rfid.CanvasRFID.tag_gcode",
++    "klippy.extras.canvas_rfid.CanvasRFID.uid",
++    "klippy.extras.canvas_rfid.CanvasRFID.use_seq",
++    "klippy.extras.canvas_rfid.CanvasRFID.version",
++    "klippy.extras.canvas_rfid.load_config_prefix",
++    "klippy.extras.drv8833._clamp",
++    "klippy.extras.drv8833.Drv8833Interface.drv8833_set_speed",
++    "klippy.extras.drv8833.Drv8833Interface.drv8833_move",
++    "klippy.extras.drv8833.MCUDrv8833Controller.__init__",
++    "klippy.extras.drv8833.MCUDrv8833Controller._pid_to_mcu",
++    "klippy.extras.drv8833.MCUDrv8833Controller._build_config",
++    "klippy.extras.drv8833.MCUDrv8833Controller._handle_status",
++    "klippy.extras.drv8833.MCUDrv8833Controller.start",
++    "klippy.extras.drv8833.MCUDrv8833Controller.start_move",
++    "klippy.extras.drv8833.MCUDrv8833Controller.manual_start",
++    "klippy.extras.drv8833.MCUDrv8833Controller.set_pid",
++    "klippy.extras.drv8833.MCUDrv8833Controller.stop",
++    "klippy.extras.drv8833.MCUDrv8833Controller._manual_cmd",
++    "klippy.extras.drv8833.MCUDrv8833Controller._set_cmd",
++    "klippy.extras.drv8833.MCUDrv8833Controller._set_pid_cmd",
++    "klippy.extras.drv8833.MCUDrv8833Controller.cycle_time",
++    "klippy.extras.drv8833.MCUDrv8833Controller.default_duty",
++    "klippy.extras.drv8833.MCUDrv8833Controller.hall_pin",
++    "klippy.extras.drv8833.MCUDrv8833Controller.hall_pullup",
++    "klippy.extras.drv8833.MCUDrv8833Controller.hall_resolution",
++    "klippy.extras.drv8833.MCUDrv8833Controller.last_active",
++    "klippy.extras.drv8833.MCUDrv8833Controller.last_count",
++    "klippy.extras.drv8833.MCUDrv8833Controller.last_duty_cycle",
++    "klippy.extras.drv8833.MCUDrv8833Controller.last_manual",
++    "klippy.extras.drv8833.MCUDrv8833Controller.last_speed_mm_s",
++    "klippy.extras.drv8833.MCUDrv8833Controller.last_status_time",
++    "klippy.extras.drv8833.MCUDrv8833Controller.max_duty_step",
++    "klippy.extras.drv8833.MCUDrv8833Controller.mcu",
++    "klippy.extras.drv8833.MCUDrv8833Controller.motor_fwd_pin",
++    "klippy.extras.drv8833.MCUDrv8833Controller.motor_rwd_pin",
++    "klippy.extras.drv8833.MCUDrv8833Controller.oid",
++    "klippy.extras.drv8833.MCUDrv8833Controller.pid_kd",
++    "klippy.extras.drv8833.MCUDrv8833Controller.pid_ki",
++    "klippy.extras.drv8833.MCUDrv8833Controller.pid_kp",
++    "klippy.extras.drv8833.MCUDrv8833Controller.printer",
++    "klippy.extras.drv8833.MCUDrv8833Controller.reactor",
++    "klippy.extras.drv8833.MCUDrv8833Controller.status_callback",
++    "klippy.extras.drv8833.MCUDrv8833Controller.status_sequence",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.__init__",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune._pause",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune._wait_for_status",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune._measure_speed",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune._find_baseline_duty",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune._check_peak",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune._collect_relay_response",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune._get_peak_pairs",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune._calc_pid",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.write_file_data",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.run",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.band",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.controller",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.data",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.direction",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.eventtime",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.gcmd",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.lane",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.peaks",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.reactor",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.sample_time",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.settle_time",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.switch_times",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.target_speed",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.timeout",
++    "klippy.extras.drv8833.Drv8833PIDAutoTune.write_file",
++    "klippy.extras.drv8833.Drv8833CommandHelper.__init__",
++    "klippy.extras.drv8833.Drv8833CommandHelper._lookup_lane",
++    "klippy.extras.drv8833.Drv8833CommandHelper.cmd_MOVE_DEBUG",
++    "klippy.extras.drv8833.Drv8833CommandHelper.cmd_DRV_SET_SPEED",
++    "klippy.extras.drv8833.Drv8833CommandHelper.cmd_DRV_MOVE",
++    "klippy.extras.drv8833.Drv8833CommandHelper.cmd_DRV8833_PID_TUNE",
++    "klippy.extras.drv8833.Drv8833CommandHelper.cmd_SET_DRV8833_PID",
++    "klippy.extras.drv8833.Drv8833CommandHelper.gcode",
++    "klippy.extras.drv8833.Drv8833CommandHelper.printer",
++    "klippy.extras.drv8833.PrinterDrv8833.__init__",
++    "klippy.extras.drv8833.PrinterDrv8833.get_status",
++    "klippy.extras.drv8833.PrinterDrv8833._handle_request_restart",
++    "klippy.extras.drv8833.PrinterDrv8833._handle_stop",
++    "klippy.extras.drv8833.PrinterDrv8833._handle_hall_status",
++    "klippy.extras.drv8833.PrinterDrv8833._start",
++    "klippy.extras.drv8833.PrinterDrv8833._start_move",
++    "klippy.extras.drv8833.PrinterDrv8833._start_manual",
++    "klippy.extras.drv8833.PrinterDrv8833._stop",
++    "klippy.extras.drv8833.PrinterDrv8833._save_pid_gains",
++    "klippy.extras.drv8833.PrinterDrv8833.set_pid_gains",
++    "klippy.extras.drv8833.PrinterDrv8833._get_debug_totals",
++    "klippy.extras.drv8833.PrinterDrv8833._wait_for_move_complete",
++    "klippy.extras.drv8833.PrinterDrv8833._format_debug_message",
++    "klippy.extras.drv8833.PrinterDrv8833.drv8833_set_speed",
++    "klippy.extras.drv8833.PrinterDrv8833.drv8833_move",
++    "klippy.extras.drv8833.PrinterDrv8833.cmd_MOVE_DEBUG",
++    "klippy.extras.drv8833.PrinterDrv8833.cmd_DRV_SET_SPEED",
++    "klippy.extras.drv8833.PrinterDrv8833.cmd_DRV_MOVE",
++    "klippy.extras.drv8833.PrinterDrv8833.cmd_SET_DRV8833_PID",
++    "klippy.extras.drv8833.PrinterDrv8833.cmd_DRV8833_PID_TUNE",
++    "klippy.extras.drv8833.PrinterDrv8833.active",
++    "klippy.extras.drv8833.PrinterDrv8833.debug_gcmd",
++    "klippy.extras.drv8833.PrinterDrv8833.debug_hall_start",
++    "klippy.extras.drv8833.PrinterDrv8833.debug_next_log_time",
++    "klippy.extras.drv8833.PrinterDrv8833.direction",
++    "klippy.extras.drv8833.PrinterDrv8833.direction_name",
++    "klippy.extras.drv8833.PrinterDrv8833.gcode",
++    "klippy.extras.drv8833.PrinterDrv8833.hall_controller",
++    "klippy.extras.drv8833.PrinterDrv8833.manual_mode",
++    "klippy.extras.drv8833.PrinterDrv8833.mcu",
++    "klippy.extras.drv8833.PrinterDrv8833.name",
++    "klippy.extras.drv8833.PrinterDrv8833.printer",
++    "klippy.extras.drv8833.PrinterDrv8833.reactor",
++    "klippy.extras.drv8833.PrinterDrv8833.section_name",
++    "klippy.extras.drv8833.PrinterDrv8833.target_speed",
++    "klippy.extras.drv8833.load_config_prefix",
++    "klippy.extras.load_cell.hx711s.HX711SBase.__init__",
++    "klippy.extras.load_cell.hx711s.HX711SBase._build_config",
++    "klippy.extras.load_cell.hx711s.HX711SBase.get_mcu",
++    "klippy.extras.load_cell.hx711s.HX711SBase.get_samples_per_second",
++    "klippy.extras.load_cell.hx711s.HX711SBase.get_range",
++    "klippy.extras.load_cell.hx711s.HX711SBase.get_channel_count",
++    "klippy.extras.load_cell.hx711s.HX711SBase.add_client",
++    "klippy.extras.load_cell.hx711s.HX711SBase.attach_load_cell_probe",
++    "klippy.extras.load_cell.hx711s.HX711SBase._convert_samples",
++    "klippy.extras.load_cell.hx711s.HX711SBase._start_measurements",
++    "klippy.extras.load_cell.hx711s.HX711SBase._finish_measurements",
++    "klippy.extras.load_cell.hx711s.HX711SBase._process_batch",
++    "klippy.extras.load_cell.hx711s.HX711SBase.attach_probe_cmd",
++    "klippy.extras.load_cell.hx711s.HX711SBase.batch_bulk",
++    "klippy.extras.load_cell.hx711s.HX711SBase.consecutive_fails",
++    "klippy.extras.load_cell.hx711s.HX711SBase.dout_pins",
++    "klippy.extras.load_cell.hx711s.HX711SBase.ffreader",
++    "klippy.extras.load_cell.hx711s.HX711SBase.gain_channel",
++    "klippy.extras.load_cell.hx711s.HX711SBase.last_error_count",
++    "klippy.extras.load_cell.hx711s.HX711SBase.mcu",
++    "klippy.extras.load_cell.hx711s.HX711SBase.name",
++    "klippy.extras.load_cell.hx711s.HX711SBase.oid",
++    "klippy.extras.load_cell.hx711s.HX711SBase.printer",
++    "klippy.extras.load_cell.hx711s.HX711SBase.query_hx711s_cmd",
++    "klippy.extras.load_cell.hx711s.HX711SBase.sclk_pins",
++    "klippy.extras.load_cell.hx711s.HX711SBase.sensor_count",
++    "klippy.extras.load_cell.hx711s.HX711SBase.sensor_type",
++    "klippy.extras.load_cell.hx711s.HX711SBase.sps",
++    "klippy.extras.load_cell.hx711s.HX711S.__init__",
++    "klippy.extras.load_cell.hx711s.HX717S.__init__",
++    "klippy.extras.thermistor.Thermistor._remove_pulldown",
++    "klippy.extras.thermistor.Thermistor._apply_pulldown",
++    "klippy.extras.thermistor.Thermistor.pulldown_resistor",
+ ];
+diff --git a/tools/gen_mirror.py b/tools/gen_mirror.py
+index 010ea13..bdccfd6 100644
+--- a/tools/gen_mirror.py
++++ b/tools/gen_mirror.py
+@@ -20,7 +20,9 @@
+ # Output: src/plugins/mirror/<module>.py (one per klippy module) and
+ # src/plugins/mirror_ids.rs (the ID -> qualified name table, same order).
+ #
+-# usage: gen_mirror.py KALICO_DIR OUT_DIR   (OUT_DIR = kaliru/src/plugins)
++# usage: gen_mirror.py KALICO_DIR OUT_DIR [BASE_IDS]   (OUT_DIR = kaliru/src/plugins)
++# BASE_IDS: an existing mirror_ids.rs whose IDs are kept, new names appended
++# (Rusticc mirrors its COSMOS reference, Kalico plus COSMOS's patches)
+ import ast
+ import builtins
+ import pathlib
+@@ -71,11 +73,16 @@ def statement_loads(node):
+ 
+ 
+ class Ids:
+-    def __init__(self):
+-        self.names = []
++    def __init__(self, base=()):
++        # base: an earlier table whose IDs stay (new names are appended)
++        self.names = list(base)
++        self.index = {n: i for i, n in enumerate(self.names)}
+ 
+     def new(self, qualname):
++        if qualname in self.index:
++            return self.index[qualname]
+         self.names.append(qualname)
++        self.index[qualname] = len(self.names) - 1
+         return len(self.names) - 1
+ 
+ 
+@@ -383,7 +390,12 @@ def main():
+     kalico, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+     rev = subprocess.run(["git", "-C", str(kalico), "rev-parse", "--short", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+-    ids = Ids()
++    base = []
++    if len(sys.argv) > 3:
++        text = pathlib.Path(sys.argv[3]).read_text()
++        base = [l.strip()[1:-2] for l in text.split("pub static IDS")[1].splitlines() if l.strip().startswith('"')]
++        rev = rev or text.splitlines()[0].split(" from Kalico ")[1].split(":")[0] + " with patches"
++    ids = Ids(base)
+     mdir = out / "mirror"
+     mdir.mkdir(parents=True, exist_ok=True)
+     for old in mdir.glob("*.py"):

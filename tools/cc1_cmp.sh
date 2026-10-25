@@ -81,6 +81,10 @@ rm -rf ~/rk/cc1_py ~/rk/cc1_rs
 stage
 python3 tools/refrun.py --timeout ${TIMEOUT:-600} --out ~/rk/cc1_py --cwd $REF --klippy "$HOME/rk/venv315/bin/python -m klippy" $STAGE/cc1.test < /dev/null | tail -1
 stage
+# RS_PY_AFC=1: Rusticc runs the python AFC (its escape hatch; the reference
+# has no such option): the plugin layer against the reference
+# (its own included file: printer.cfg ends in the SAVE_CONFIG block)
+if [ -n "$RS_PY_AFC" ]; then printf '[danger_options]\nuse_python_modules: AFC\n' > $STAGE/config/klipper-readonly/zz-rusticc-python-afc.cfg; fi
 KALIRU_KLIPPY_DIR=$REF/klippy \
 KALIRU_LIBPYTHON=${KALIRU_LIBPYTHON:-$HOME/.local/share/uv/python/cpython-3.15-linux-x86_64-gnu/lib/libpython3.15.so.1.0} \
 PYTHONPATH=$HOME/rk/venv315/lib/python3.15/site-packages \

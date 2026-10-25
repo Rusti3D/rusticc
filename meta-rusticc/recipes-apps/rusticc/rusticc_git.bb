@@ -8,7 +8,9 @@ LIC_FILES_CHKSUM = "file://COPYING;md5=1ebbd3e34237af26da5dc08a4e440464"
 # as COSMOS builds Kalico with its own: files/kaliru, listed by
 # rusticc-patches.inc (tools/kaliru-tree.sh / kaliru-export.sh)
 SRC_URI = "git://github.com/Rusti3D/kaliru.git;protocol=https;branch=main"
-SRCREV = "a89322765a98264fd03d0435e1430c8c507cf05c"
+SRCREV = "99812196fbded9e6c8f9250603f4f9944a08f3dc"
+# git am: patch 0023 carries a binary file (the plugin mirror bundle)
+PATCHTOOL = "git"
 PV = "0.1.0+git"
 
 require rusticc-patches.inc

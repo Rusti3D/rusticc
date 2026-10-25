@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 17:44:41 +0200
-Subject: [PATCH 22/22] rusticc: native AFC for cosmoace_afc (the ACE Pro / ACE
+Subject: [PATCH 22/23] rusticc: native AFC for cosmoace_afc (the ACE Pro / ACE
  2 units)
 
 The AFC_ACE plugin in Rust: afcACE, AceSetup, the dryer heater and humidity

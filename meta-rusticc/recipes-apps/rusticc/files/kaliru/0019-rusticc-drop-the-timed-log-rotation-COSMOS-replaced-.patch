@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 14:54:51 +0200
-Subject: [PATCH 19/22] rusticc: drop the timed log rotation COSMOS replaced;
+Subject: [PATCH 19/23] rusticc: drop the timed log rotation COSMOS replaced;
  pcprof cast
 
 COSMOS rotates klippy.log by size, so kaliru's TimedRotatingFileHandler port

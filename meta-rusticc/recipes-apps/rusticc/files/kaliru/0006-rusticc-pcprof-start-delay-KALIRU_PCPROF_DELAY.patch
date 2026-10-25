@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sat, 24 Oct 2026 20:56:45 +0300
-Subject: [PATCH 06/22] rusticc: pcprof start delay (KALIRU_PCPROF_DELAY)
+Subject: [PATCH 06/23] rusticc: pcprof start delay (KALIRU_PCPROF_DELAY)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
