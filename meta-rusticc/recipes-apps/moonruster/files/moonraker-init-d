@@ -1,0 +1,74 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          moonraker
+# Required-Start:    $local_fs $remote_fs $network klipper
+# Required-Stop:     $local_fs $remote_fs $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Moonraker API Server for Klipper
+### END INIT INFO
+
+MOONRAKER_EXEC="/usr/bin/moonruster"
+MOONRAKER_ARGS="-d /etc/klipper -l /board-resource/moonraker.log -u /run/moonraker.sock"
+PIDFILE="/var/run/moonraker.pid"
+ASVC_OVERLAY="/data/overlay-etc/upper/klipper/moonraker.asvc"
+ASVC_DEFAULT="/usr/share/moonraker/moonraker/assets/default_allowed_services"
+
+export TMPDIR="/user-resource/.tmp"
+# Rusticc: Moonruster in place of python3 -m moonraker. Its python
+# components load from COSMOS's Moonraker tree on the image's CPython, with
+# COSMOS's interpreter options (-X lazy_imports=all -X no_debug_ranges);
+# logs rotate at 5 MB as on COSMOS's Moonraker
+export MOONRUSTER_MOONRAKER_DIR="/usr/share/moonraker"
+export MOONRUSTER_PYTHON="/usr/bin/python3"
+export PYTHON_LAZY_IMPORTS=all
+export PYTHONNODEBUGRANGES=1
+export MOONRUSTER_LOG_MAX_BYTES=5242880
+
+case "$1" in
+    start)
+        echo "Starting moonraker..."
+        # Clean up OpenCentauri so moonraker doesn't index everything here
+        rm -rf /user-resource/OpenCentauri
+        mkdir -p /user-resource/.tmp
+        mkdir -p /user-resource/gcodes
+        # Older images let moonraker generate its default asvc in the overlay,
+        # which hides the one shipped in the image
+        if cmp -s "$ASVC_OVERLAY" "$ASVC_DEFAULT"; then
+            rm -f "$ASVC_OVERLAY"
+        fi
+
+        if [ -d /etc/webui ]; then
+            rm -f /etc/webui
+        fi
+
+        ln -sf "/var/www/$(config-manager ui web_ui)/" /etc/webui
+
+        start-stop-daemon -S -b -m -p $PIDFILE \
+            -x $MOONRAKER_EXEC -- $MOONRAKER_ARGS
+        ;;
+    stop)
+        echo "Stopping moonraker..."
+        start-stop-daemon -K -p $PIDFILE -R 10
+        rm -f $PIDFILE
+        ;;
+    restart|force-reload)
+        $0 stop
+        sleep 1
+        $0 start
+        ;;
+    status)
+        if [ -f $PIDFILE ] && kill -0 $(cat $PIDFILE) 2>/dev/null; then
+            echo "moonraker is running (PID $(cat $PIDFILE))"
+        else
+            echo "moonraker is not running"
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit 0

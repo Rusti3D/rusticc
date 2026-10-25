@@ -1,0 +1,1226 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sun, 25 Oct 2026 05:01:33 +0200
+Subject: [PATCH 1/2] rusticc: COSMOS's Moonraker patches (from Moonruster's
+ cosmos branch)
+
+swu_deploy (SWUDeploy), log rotation at 5 MB (MOONRUSTER_LOG_MAX_BYTES),
+web_client / webcam_redirect (serve static files), ':port' webcam URLs,
+the sysvinit machine provider: the Rust equivalents of meta-opencentauri's
+moonraker patches.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/application.rs               | 111 ++++-
+ src/components/machine.rs                   | 160 ++++++-
+ src/components/update_manager/common.rs     |  11 +-
+ src/components/update_manager/mod.rs        |   2 +
+ src/components/update_manager/swu_deploy.rs | 461 ++++++++++++++++++++
+ src/components/webcam.rs                    |  39 +-
+ src/loghelper.rs                            |  40 +-
+ src/utils.rs                                |  42 ++
+ 8 files changed, 849 insertions(+), 17 deletions(-)
+ create mode 100644 src/components/update_manager/swu_deploy.rs
+
+diff --git a/src/components/application.rs b/src/components/application.rs
+index b5f07f3..102b6be 100644
+--- a/src/components/application.rs
++++ b/src/components/application.rs
+@@ -381,6 +381,9 @@ pub enum HandlerKind {
+     Upload { location_prefix: String, max_upload_size: u64 },
+     WebSocket,
+     BridgeSocket,
++    // web_client / webcam_redirect (COSMOS patch to moonraker)
++    WebClientRoot { path: String },
++    WebcamRedirect { upstream: String },
+ }
+ 
+ struct Rule {
+@@ -439,6 +442,7 @@ pub struct MoonrakerApp {
+     cert_path: PathBuf,
+     key_path: PathBuf,
+     route_prefix: String,
++    web_client_path: Option<String>,
+     template_cache: RefCell<HashMap<String, Rc<crate::components::template::JinjaTemplate>>>,
+     listeners: RefCell<Vec<tokio::task::JoinHandle<()>>>,
+     pub verbose: bool,
+@@ -471,6 +475,24 @@ impl MoonrakerApp {
+             home_pattern = format!("{}/?", route_prefix);
+         }
+         let max_ws_conns = config.getint_or("max_websocket_connections", MAX_WS_CONNS_DEFAULT)?;
++        // Optional static web client: a full path, or a name under /var/www.
++        // COSMOS only: upstream Moonraker has neither option, and reading one
++        // would list it in /server/config
++        let cosmos = utils::is_cosmos();
++        let mut web_client_path = None;
++        if let Some(mut wcp) = if cosmos { config.get_opt("web_client")? } else { None } {
++            if !wcp.starts_with('/') && !wcp.starts_with('~') {
++                wcp = format!("/var/www/{}", wcp);
++            }
++            let wcp = utils::expand_user(&wcp).to_string_lossy().to_string();
++            if Path::new(&wcp).is_dir() {
++                log::info!("Static web client enabled, serving from: {}", wcp);
++                web_client_path = Some(wcp);
++            } else {
++                log::warn!("web_client '{}' is not a valid directory, static file serving disabled", wcp);
++            }
++        }
++        let webcam_redirect = if cosmos { config.get_opt("webcam_redirect")? } else { None };
+         let app = Rc::new(MoonrakerApp {
+             json_rpc: json_rpc.clone(),
+             api_cache: RefCell::new(HashMap::new()),
+@@ -482,12 +504,19 @@ impl MoonrakerApp {
+             cert_path,
+             key_path,
+             route_prefix: route_prefix.clone(),
++            web_client_path: web_client_path.clone(),
+             template_cache: RefCell::new(HashMap::new()),
+             listeners: RefCell::new(Vec::new()),
+             verbose: srv.is_verbose_enabled(),
+             http_running: Cell::new(false),
+         });
+-        app.add_handler(&home_pattern, HandlerKind::Welcome);
++        match web_client_path {
++            Some(path) => app.add_handler(&home_pattern, HandlerKind::WebClientRoot { path }),
++            None => app.add_handler(&home_pattern, HandlerKind::Welcome),
++        }
++        if let Some(upstream) = webcam_redirect {
++            app.add_handler("/webcam/?(.*)", HandlerKind::WebcamRedirect { upstream: upstream.trim_end_matches('/').to_string() });
++        }
+         app.add_handler(&format!("{}/server/redirect", route_prefix), HandlerKind::Redirect);
+         app.add_handler(&format!("{}/server/jsonrpc", route_prefix), HandlerKind::Rpc);
+         srv.register_component("jsonrpc", json_rpc).map_err(crate::confighelper::ConfigError::from)?;
+@@ -975,7 +1004,10 @@ impl MoonrakerApp {
+             (error_response(&HttpError::new(405), None), None)
+         } else {
+             match route {
+-                None => self.handle_not_found(&info).await,
++                None => match self.web_client_file(&info.path) {
++                    Some((root, rel)) => self.handle_web_client(&info, &root, &rel).await,
++                    None => self.handle_not_found(&info).await,
++                },
+                 Some(m) => match m.kind.clone() {
+                     HandlerKind::Welcome => (self.handle_welcome(&info).await, None),
+                     HandlerKind::Redirect => self.handle_redirect(&info).await,
+@@ -995,6 +1027,11 @@ impl MoonrakerApp {
+                         let (resp, user) = crate::components::websockets::serve_websocket(raw_req.take().unwrap(), &info, true).await;
+                         return self.finish_ws(&info, resp, user);
+                     }
++                    HandlerKind::WebClientRoot { path } => (Self::web_client_root(&info, &path), None),
++                    HandlerKind::WebcamRedirect { upstream } => {
++                        let sub = m.path_args.first().cloned().flatten().unwrap_or_default();
++                        (Self::webcam_redirect(&info, &upstream, &sub), None)
++                    }
+                 },
+             }
+         };
+@@ -1080,7 +1117,9 @@ impl MoonrakerApp {
+     }
+ 
+     fn log_request(&self, req: &HttpRequest, status: u16, user: Option<&UserInfo>) {
+-        if !self.verbose && [200, 204, 206, 304].contains(&status) {
++        // COSMOS's moonraker also skips redirects (webcam_redirect)
++        let skip_302 = status == 302 && crate::loghelper::log_max_bytes().is_some();
++        if !self.verbose && ([200, 204, 206, 304].contains(&status) || skip_302) {
+             return;
+         }
+         let request_time = 1000.0 * req.request_time();
+@@ -1387,6 +1426,57 @@ impl MoonrakerApp {
+         }
+     }
+ 
++    /// Web client file for an unrouted path: the file itself, else index.html
++    /// for client side routing
++    fn web_client_file(&self, path: &str) -> Option<(String, String)> {
++        let root = self.web_client_path.clone()?;
++        let rel = utils::url_unescape(path).trim_matches('/').to_string();
++        if !rel.contains("..") && Path::new(&root).join(&rel).is_file() {
++            return Some((root, rel));
++        }
++        Path::new(&root).join("index.html").is_file().then(|| (root, "index.html".to_string()))
++    }
++
++    async fn handle_web_client(&self, req: &HttpRequest, root: &str, rel: &str) -> (HttpResponse, Option<UserInfo>) {
++        let resp = match req.method.as_str() {
++            "GET" => self.static_get(req, root, rel, true, true).await,
++            "HEAD" => self.static_get(req, root, rel, false, true).await,
++            _ => Err(HttpError::new(405)),
++        };
++        (resp.unwrap_or_else(|e| error_response(&e, None)), None)
++    }
++
++    fn web_client_root(req: &HttpRequest, root: &str) -> HttpResponse {
++        if req.method != "GET" {
++            return error_response(&HttpError::new(405), None);
++        }
++        match std::fs::read(Path::new(root).join("index.html")) {
++            Ok(data) => {
++                let mut resp = HttpResponse::new(200);
++                resp.set_header("Content-Type", "text/html; charset=UTF-8");
++                resp.set_body(data);
++                resp
++            }
++            Err(_) => error_response(&HttpError::new(500), None),
++        }
++    }
++
++    fn webcam_redirect(req: &HttpRequest, upstream: &str, path: &str) -> HttpResponse {
++        if req.method != "GET" {
++            return error_response(&HttpError::new(405), None);
++        }
++        let host = req.host.split(':').next().unwrap_or("");
++        let mut url = format!("{}/{}", upstream.replace("127.0.0.1", host).replace("localhost", host), path);
++        if let Some((_, query)) = req.uri.split_once('?') {
++            if !query.is_empty() {
++                url = format!("{}?{}", url, query);
++            }
++        }
++        let mut resp = HttpResponse::new(302);
++        resp.set_header("Location", url);
++        resp
++    }
++
+     async fn handle_static(&self, req: &HttpRequest, m: &RouteMatch, root: &str) -> (HttpResponse, Option<UserInfo>) {
+         // AuthorizedFileHandler: images are served without auth for GET
+         let need_auth = if req.method != "GET" {
+@@ -1402,8 +1492,8 @@ impl MoonrakerApp {
+         };
+         let path_arg = m.path_args.first().cloned().flatten().unwrap_or_default();
+         let resp = match req.method.as_str() {
+-            "GET" => self.static_get(req, root, &path_arg, true).await,
+-            "HEAD" => self.static_get(req, root, &path_arg, false).await,
++            "GET" => self.static_get(req, root, &path_arg, true, false).await,
++            "HEAD" => self.static_get(req, root, &path_arg, false, false).await,
+             "DELETE" => self.static_delete(req).await,
+             "OPTIONS" => Ok(self.options_response(req, cors)),
+             _ => Err(HttpError::new(405)),
+@@ -1430,7 +1520,9 @@ impl MoonrakerApp {
+         Ok(HttpResponse::json(200, &json!({"result": filename})))
+     }
+ 
+-    async fn static_get(&self, req: &HttpRequest, root: &str, path: &str, include_body: bool) -> Result<HttpResponse, HttpError> {
++    /// `web_client`: tornado's plain StaticFileHandler, no reserved path check
++    /// and no attachment header
++    async fn static_get(&self, req: &HttpRequest, root: &str, path: &str, include_body: bool, web_client: bool) -> Result<HttpResponse, HttpError> {
+         // StaticFileHandler.get_absolute_path / validate_absolute_path
+         let abs_root = utils::normpath(&utils::absolute(Path::new(root)));
+         let joined = if path.is_empty() { abs_root.clone() } else { abs_root.join(path) };
+@@ -1449,7 +1541,8 @@ impl MoonrakerApp {
+         if !absolute_path.is_file() {
+             return Err(HttpError::new(403));
+         }
+-        let fm: Option<Rc<crate::components::file_manager::FileManager>> = server().lookup_component("file_manager");
++        let fm: Option<Rc<crate::components::file_manager::FileManager>> =
++            if web_client { None } else { server().lookup_component("file_manager") };
+         if let Some(fm) = fm {
+             fm.check_reserved_path(&absolute_path.to_string_lossy(), false)
+                 .map_err(|e| HttpError::std_from(&e))?;
+@@ -1473,7 +1566,9 @@ impl MoonrakerApp {
+         let basename = absolute_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+         let ascii: String = basename.chars().map(|c| if c.is_ascii() { c } else { '?' }).collect::<String>().replace('"', "\\\"");
+         let utf8 = utils::url_quote(&basename);
+-        resp.set_header("Content-Disposition", format!("attachment; filename=\"{}\"; filename*=UTF-8''{}", ascii, utf8));
++        if !web_client {
++            resp.set_header("Content-Disposition", format!("attachment; filename=\"{}\"; filename*=UTF-8''{}", ascii, utf8));
++        }
+         // should_return_304 (If-None-Match is ignored by moonraker)
+         if let Some(ims) = req.header("If-Modified-Since") {
+             if let Ok(since) = httpdate::parse_http_date(&ims) {
+diff --git a/src/components/machine.rs b/src/components/machine.rs
+index 6855537..ff765af 100644
+--- a/src/components/machine.rs
++++ b/src/components/machine.rs
+@@ -30,6 +30,13 @@ const SYSTEMD_MGR: &str = "org.freedesktop.systemd1.Manager";
+ const LOGIN_BUS: &str = "org.freedesktop.login1";
+ const LOGIN_PATH: &str = "/org/freedesktop/login1";
+ const LOGIN_MGR: &str = "org.freedesktop.login1.Manager";
++// sysvinit provider (COSMOS patch to moonraker)
++const SYSV_INIT_PATH: &str = "/etc/init.d";
++const SYSV_PID_PATH: &str = "/var/run";
++const SYSV_ACTIONS: [&str; 3] = ["start", "stop", "restart"];
++const SYSV_ACTION_TIMEOUT: f64 = 60.0;
++const SYSV_STATUS_TIMEOUT: f64 = 5.0;
++const SYSV_STATUS_SEQUENCE: u64 = 5;
+ 
+ pub type SudoCallback = Rc<dyn Fn() -> LocalBoxFuture<'static, Result<(String, bool), ServerError>>>;
+ 
+@@ -166,6 +173,7 @@ pub enum ProviderKind {
+     SystemdCli,
+     SystemdDbus,
+     SupervisordCli,
++    Sysvinit,
+ }
+ 
+ pub struct Provider {
+@@ -173,6 +181,8 @@ pub struct Provider {
+     shutdown_action: String,
+     available_services: RefCell<IndexMap<String, Value>>,
+     svc_cmd: RefCell<Option<Rc<ShellCommand>>>,
++    status_cmds: RefCell<IndexMap<String, Rc<ShellCommand>>>,
++    status_pidfiles: RefCell<IndexMap<String, PathBuf>>,
+     spv_conf: String,
+     dbus_ready: Cell<bool>,
+     login_mgr: Cell<bool>,
+@@ -225,9 +235,60 @@ impl Provider {
+                 self.update_service_status(0, true).await;
+                 self.register_status_cb();
+             }
++            ProviderKind::Sysvinit => {
++                let machine: Rc<Machine> = match server().lookup_component("machine") {
++                    Some(m) => m,
++                    None => return,
++                };
++                // COSMOS's zram script replaces /sbin/init with a shell shim,
++                // which trips container detection
++                machine.inside_container.set(false);
++                for svc in machine.allowed_services.borrow().iter() {
++                    let script = Path::new(SYSV_INIT_PATH).join(svc);
++                    if script.is_file() && crate::utils::access_exec(&script) {
++                        self.available_services
++                            .borrow_mut()
++                            .insert(svc.clone(), json!({"active_state": "unknown", "sub_state": "unknown"}));
++                        let cmd = self.shell().build_shell_command(&format!("{}/{} status", SYSV_INIT_PATH, svc), None, None, None, false, None);
++                        self.status_cmds.borrow_mut().insert(svc.clone(), cmd);
++                        if let Some(pidfile) = std::fs::read_to_string(&script).ok().and_then(|t| sysv_status_pidfile(&t)) {
++                            self.status_pidfiles.borrow_mut().insert(svc.clone(), pidfile);
++                        }
++                    }
++                }
++                if !self.available_services.borrow().is_empty() {
++                    self.update_service_status(0, true).await;
++                    self.register_status_cb();
++                }
++            }
+         }
+     }
+ 
++    async fn update_sysv_state(&self, svc: &str, notify: bool) {
++        let pidfile = self.status_pidfiles.borrow().get(svc).cloned();
++        let running = match pidfile {
++            // what the script's status does, without starting a shell
++            Some(p) => std::fs::read_to_string(&p)
++                .ok()
++                .and_then(|t| t.trim().parse::<libc::pid_t>().ok())
++                .map(|pid| unsafe { libc::kill(pid, 0) } == 0)
++                .unwrap_or(false),
++            None => {
++                let cmd = match self.status_cmds.borrow().get(svc) {
++                    Some(c) => c.clone(),
++                    None => return,
++                };
++                cmd.run(&self.shell(), SYSV_STATUS_TIMEOUT, false, false, 1, None, None).await
++            }
++        };
++        let new_state = if running {
++            json!({"active_state": "active", "sub_state": "running"})
++        } else {
++            json!({"active_state": "inactive", "sub_state": "dead"})
++        };
++        self.apply_state(svc, new_state, notify);
++    }
++
+     fn register_status_cb(self: &Rc<Self>) {
+         if let Some(ps) = server().lookup_component::<crate::components::proc_stats::ProcStats>("proc_stats") {
+             let p = Rc::downgrade(self);
+@@ -473,6 +534,15 @@ impl Provider {
+     }
+ 
+     async fn update_service_status(&self, sequence: u64, notify: bool) {
++        if self.kind == ProviderKind::Sysvinit {
++            if sequence % SYSV_STATUS_SEQUENCE == 0 {
++                let svcs: Vec<String> = self.available_services.borrow().keys().cloned().collect();
++                for svc in svcs {
++                    self.update_sysv_state(&svc, notify).await;
++                }
++            }
++            return;
++        }
+         if sequence % 2 != 0 {
+             return;
+         }
+@@ -529,6 +599,9 @@ impl Provider {
+     }
+ 
+     pub async fn shutdown(&self) -> Result<(), ServerError> {
++        if self.kind == ProviderKind::Sysvinit {
++            return self.shell().exec(&self.shutdown_action, 2.0).await.map(|_| ()).map_err(ServerError::from);
++        }
+         if self.kind == ProviderKind::SystemdDbus && self.login_mgr.get() {
+             let method = if self.shutdown_action == "poweroff" { "PowerOff" } else { "Halt" };
+             let dbus = self.dbus().ok_or_else(|| ServerError::new("DBus Not Connected, ", 503))?;
+@@ -548,6 +621,9 @@ impl Provider {
+     }
+ 
+     pub async fn reboot(&self) -> Result<(), ServerError> {
++        if self.kind == ProviderKind::Sysvinit {
++            return self.shell().exec("reboot", 2.0).await.map(|_| ()).map_err(ServerError::from);
++        }
+         if self.kind == ProviderKind::SystemdDbus && self.login_mgr.get() {
+             let dbus = self.dbus().ok_or_else(|| ServerError::new("DBus Not Connected, ", 503))?;
+             let _: () = dbus.call(LOGIN_BUS, LOGIN_PATH, LOGIN_MGR, "Reboot", &(false,)).await?;
+@@ -566,6 +642,33 @@ impl Provider {
+             ProviderKind::None => Err(ServerError::new("Service Actions Not Available", 503)),
+             ProviderKind::SystemdCli => self.exec_sudo(&format!("systemctl {} {}", action, service_name)).await.map(|_| ()),
+             ProviderKind::SupervisordCli => self.exec_supervisorctl(&format!("{} {}", action, service_name), 1, 6.0, None).await.map(|_| ()),
++            ProviderKind::Sysvinit => {
++                if !SYSV_ACTIONS.contains(&action) {
++                    return Err(ServerError::bad(format!("Invalid service action '{}'", action)));
++                }
++                if !self.is_service_available(service_name) {
++                    return Err(ServerError::bad(format!("Service '{}' not available", service_name)));
++                }
++                let script = format!("{}/{}", SYSV_INIT_PATH, service_name);
++                let machine: Option<Rc<Machine>> = server().lookup_component("machine");
++                if machine.map(|m| m.unit_name() == service_name).unwrap_or(false) {
++                    // the init script stops us, so it must outlive this process
++                    use std::os::unix::process::CommandExt;
++                    std::process::Command::new(&script)
++                        .arg(action)
++                        .stdin(std::process::Stdio::null())
++                        .stdout(std::process::Stdio::null())
++                        .stderr(std::process::Stdio::null())
++                        .process_group(0)
++                        .spawn()?;
++                    return Ok(());
++                }
++                self.shell()
++                    .exec_cmd(&format!("{} {}", script, action), ExecOpts { timeout: SYSV_ACTION_TIMEOUT, log_complete: false, ..Default::default() })
++                    .await?;
++                self.update_sysv_state(service_name, true).await;
++                Ok(())
++            }
+             ProviderKind::SystemdDbus => {
+                 let dbus = match self.dbus() {
+                     Some(d) if d.is_connected() && self.dbus_ready.get() => d,
+@@ -589,7 +692,9 @@ impl Provider {
+ 
+     pub async fn check_virt_status(&self) -> Value {
+         match self.kind {
+-            ProviderKind::None | ProviderKind::SupervisordCli => json!({"virt_type": "unknown", "virt_identifier": "unknown"}),
++            ProviderKind::None | ProviderKind::SupervisordCli | ProviderKind::Sysvinit => {
++                json!({"virt_type": "unknown", "virt_identifier": "unknown"})
++            }
+             ProviderKind::SystemdCli => {
+                 let mut virt_id = "none".to_string();
+                 let mut virt_type = "none".to_string();
+@@ -722,6 +827,23 @@ impl Provider {
+                 }
+             }
+             ProviderKind::SupervisordCli => self.extract_spv_info(service_name, pid).await,
++            ProviderKind::Sysvinit => {
++                let pid_file = Path::new(SYSV_PID_PATH).join(format!("{}.pid", service_name));
++                let file_pid = std::fs::read_to_string(&pid_file).ok().and_then(|s| s.trim().parse::<i64>().ok());
++                if file_pid == Some(pid) {
++                    return json!({
++                        "unit_name": service_name,
++                        "is_default": true,
++                        "manager": "sysvinit",
++                        "properties": {
++                            "InitScript": format!("{}/{}", SYSV_INIT_PATH, service_name),
++                            "PIDFile": pid_file.to_string_lossy(),
++                        }
++                    });
++                }
++                log::info!("Unable to locate service info for {}, pid: {}", service_name, pid);
++                json!({})
++            }
+         }
+     }
+ 
+@@ -921,6 +1043,8 @@ impl Machine {
+             "systemd_cli" => ProviderKind::SystemdCli,
+             "systemd_dbus" => ProviderKind::SystemdDbus,
+             "supervisord_cli" => ProviderKind::SupervisordCli,
++            // COSMOS only: upstream Moonraker rejects it (Invalid Provider)
++            "sysvinit" if crate::utils::is_cosmos() => ProviderKind::Sysvinit,
+             other => return Err(ConfigHelper::error(format!("Invalid Provider: {}", other))),
+         };
+         let shutdown_action = config.getchoice("shutdown_action", &["halt", "poweroff"], Some("poweroff"), true)?;
+@@ -931,6 +1055,8 @@ impl Machine {
+             shutdown_action,
+             available_services: RefCell::new(IndexMap::new()),
+             svc_cmd: RefCell::new(None),
++            status_cmds: RefCell::new(IndexMap::new()),
++            status_pidfiles: RefCell::new(IndexMap::new()),
+             spv_conf,
+             dbus_ready: Cell::new(false),
+             login_mgr: Cell::new(false),
+@@ -1107,8 +1233,6 @@ impl Machine {
+         self.provider.extract_service_info(name, pid, None, false).await
+     }
+ 
+-    // Moonraker's Machine.get_system_provider (Python components, docs/PLUGINS.md)
+-    #[allow(dead_code)]
+     pub fn get_system_provider(&self) -> Rc<Provider> {
+         self.provider.clone()
+     }
+@@ -1666,6 +1790,20 @@ impl Machine {
+     }
+ }
+ 
++/// The pid file of an init script whose `status)` is only the usual
++/// `[ -f $PIDFILE ] && kill -0 $(cat $PIDFILE)` check
++fn sysv_status_pidfile(script: &str) -> Option<PathBuf> {
++    let pidfile = script.lines().find_map(|l| l.trim().strip_prefix("PIDFILE="))?.trim_matches('"').to_string();
++    if !pidfile.starts_with('/') || pidfile.contains('$') {
++        return None;
++    }
++    let status = script.split_once("status)")?.1;
++    let status = status.split(";;").next()?;
++    let only_pid_check = status.contains("kill -0")
++        && status.lines().filter(|l| l.contains("kill -0")).all(|l| l.contains("PIDFILE") || l.contains(&pidfile));
++    only_pid_check.then(|| PathBuf::from(pidfile))
++}
++
+ /// The interfaces `ip -json -det address` reports: up, ethernet type, with
+ /// addresses (getifaddrs order, as ip's).  None when a CAN interface is up.
+ fn native_network() -> Option<Map<String, Value>> {
+@@ -2443,3 +2581,19 @@ fn check_path_bare(path: &Path) -> bool {
+ pub fn load_component(config: &ConfigHelper) -> Result<Rc<Machine>, crate::confighelper::ConfigError> {
+     Machine::new(config)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn sysv_status_pidfile_detection() {
++        let klipper = "PIDFILE=\"/var/run/klipper.pid\"\ncase \"$1\" in\n    status)\n        if [ -f $PIDFILE ] && kill -0 $(cat $PIDFILE) 2>/dev/null; then\n            echo running\n        else\n            exit 1\n        fi\n        ;;\nesac\n";
++        assert_eq!(sysv_status_pidfile(klipper), Some(PathBuf::from("/var/run/klipper.pid")));
++        let gui = "PIDFILE=/var/run/gui.pid\n    status)\n        if [ -f \"/var/run/gui.pid\" ] && kill -0 \"$(cat \"/var/run/gui.pid\")\" 2>/dev/null; then\n        fi\n        ;;\n";
++        assert_eq!(sysv_status_pidfile(gui), Some(PathBuf::from("/var/run/gui.pid")));
++        let gpio = "PIDFILE=/var/run/x.pid\n    status)\n        gpio_value=$(cat /sys/class/gpio/gpio1/value)\n        ;;\n";
++        assert_eq!(sysv_status_pidfile(gpio), None);
++        assert_eq!(sysv_status_pidfile("PIDFILE=$RUN/x.pid\nstatus)\nkill -0 $(cat $PIDFILE)\n;;"), None);
++    }
++}
+diff --git a/src/components/update_manager/common.rs b/src/components/update_manager/common.rs
+index 4c257b9..ff8d507 100644
+--- a/src/components/update_manager/common.rs
++++ b/src/components/update_manager/common.rs
+@@ -22,6 +22,7 @@ pub enum AppType {
+     Zip,
+     Python,
+     Executable,
++    Swupdate,
+ }
+ 
+ impl AppType {
+@@ -33,13 +34,20 @@ impl AppType {
+             AppType::Zip => "zip",
+             AppType::Python => "python",
+             AppType::Executable => "executable",
++            AppType::Swupdate => "swupdate",
+         }
+     }
+     pub fn from_string(s: &str) -> Option<AppType> {
+         Self::all().into_iter().find(|t| t.name() == s.to_lowercase())
+     }
+     pub fn all() -> Vec<AppType> {
+-        vec![AppType::None, AppType::Web, AppType::GitRepo, AppType::Zip, AppType::Python, AppType::Executable]
++        let mut all = vec![AppType::None, AppType::Web, AppType::GitRepo, AppType::Zip, AppType::Python, AppType::Executable];
++        // COSMOS only: upstream Moonraker has no swupdate type (its choices
++        // and error messages list the others)
++        if crate::utils::is_cosmos() {
++            all.push(AppType::Swupdate);
++        }
++        all
+     }
+     pub fn valid_types() -> Vec<AppType> {
+         Self::all().into_iter().filter(|t| *t != AppType::None).collect()
+@@ -54,6 +62,7 @@ impl AppType {
+         match self {
+             AppType::None => vec![],
+             AppType::Web | AppType::Zip | AppType::Executable => vec![Channel::Stable, Channel::Beta],
++            AppType::Swupdate => vec![Channel::Stable, Channel::Dev],
+             _ => vec![Channel::Stable, Channel::Beta, Channel::Dev],
+         }
+     }
+diff --git a/src/components/update_manager/mod.rs b/src/components/update_manager/mod.rs
+index d821c38..2bb2e2c 100644
+--- a/src/components/update_manager/mod.rs
++++ b/src/components/update_manager/mod.rs
+@@ -6,6 +6,7 @@ pub mod git_deploy;
+ pub mod net_deploy;
+ mod pk_enums;
+ pub mod python_deploy;
++pub mod swu_deploy;
+ pub mod system_deploy;
+ 
+ use crate::common::*;
+@@ -1042,6 +1043,7 @@ fn get_deploy(
+         }
+         Some(AppType::GitRepo) => Rc::new(git_deploy::GitDeploy::new(cfg, cmd_helper)?),
+         Some(AppType::Python) => Rc::new(python_deploy::PythonDeploy::new(cfg, cmd_helper)?),
++        Some(AppType::Swupdate) => Rc::new(swu_deploy::SwuDeploy::new(cfg, cmd_helper)?),
+         _ => return Ok(None),
+     }))
+ }
+diff --git a/src/components/update_manager/swu_deploy.rs b/src/components/update_manager/swu_deploy.rs
+new file mode 100644
+index 0000000..579950a
+--- /dev/null
++++ b/src/components/update_manager/swu_deploy.rs
+@@ -0,0 +1,461 @@
++// SWUpdate Firmware Deployment (port of COSMOS's update_manager/swu_deploy.py,
++// a patch to moonraker that updates COSMOS images from GitHub releases)
++
++use super::common::*;
++use super::*;
++
++type DlInfo = (String, String, i64);
++
++const SHORT_HASH_LEN: usize = 10;
++const DOWNLOAD_TIMEOUT: f64 = 3600.0;
++const INSTALL_TIMEOUT: f64 = 1800.0;
++const REBOOT_DELAY: f64 = 2.0;
++const GIT_MAX_LOG_CNT: usize = 100;
++
++struct SwuState {
++    version: String,
++    remote_version: String,
++    remote_hash: String,
++    rollback_version: String,
++    branch: String,
++    last_error: String,
++    dl_info: DlInfo,
++    commits_behind: Vec<Value>,
++    commits_behind_count: i64,
++    warnings: Vec<String>,
++    reboot_pending: bool,
++}
++
++pub struct SwuDeploy {
++    app: AppDeploy,
++    repo: String,
++    owner: String,
++    project_name: String,
++    asset_name: String,
++    install_cmd: String,
++    nightly_tag: String,
++    st: RefCell<SwuState>,
++}
++
++fn dl_info_from(v: Option<&Value>) -> DlInfo {
++    let d = v.and_then(|v| v.as_array()).cloned().unwrap_or_default();
++    (
++        d.first().map(crate::pyfmt::py_str).unwrap_or("?".into()),
++        d.get(1).map(crate::pyfmt::py_str).unwrap_or("?".into()),
++        d.get(2).and_then(|v| v.as_i64()).unwrap_or(0),
++    )
++}
++
++impl SwuDeploy {
++    pub fn new(config: &ConfigHelper, cmd_helper: &Rc<CommandHelper>) -> Result<Self, ConfigError> {
++        let app = AppDeploy::new(config, cmd_helper, "SWUpdate")?;
++        let repo = config.get("repo")?.trim().trim_matches('/').to_string();
++        let (owner, project_name) = match repo.split_once('/') {
++            Some((o, p)) => (o.to_string(), p.to_string()),
++            None => return Err(ConfigHelper::error("not enough values to unpack (expected 2, got 1)")),
++        };
++        Ok(SwuDeploy {
++            app,
++            asset_name: config.get("asset_name")?,
++            install_cmd: config.get_or("install_command", "flash")?,
++            nightly_tag: config.get_or("nightly_release_tag", "0.0.0")?,
++            repo,
++            owner,
++            project_name,
++            st: RefCell::new(SwuState {
++                version: "?".into(),
++                remote_version: "?".into(),
++                remote_hash: "?".into(),
++                rollback_version: "?".into(),
++                branch: "?".into(),
++                last_error: String::new(),
++                dl_info: ("?".into(), "?".into(), 0),
++                commits_behind: vec![],
++                commits_behind_count: 0,
++                warnings: vec![],
++                reboot_pending: false,
++            }),
++        })
++    }
++
++    fn validate_install(&self) {
++        let mut st = self.st.borrow_mut();
++        st.warnings.clear();
++        self.app.is_valid.set(true);
++        st.version = crate::components::machine::parse_os_release()
++            .get("version_id")
++            .filter(|v| !v.is_empty())
++            .cloned()
++            .unwrap_or("?".into());
++        if st.version == "?" {
++            st.warnings.push("Unable to detect installed version from VERSION_ID in os-release".into());
++            self.app.is_valid.set(false);
++        }
++        let cmd = crate::components::shell_command::shlex_split(&self.install_cmd);
++        if cmd.first().and_then(|c| crate::components::machine::which(c)).is_none() {
++            st.warnings.push(format!("Install command '{}' not found", self.install_cmd));
++            self.app.is_valid.set(false);
++        }
++    }
++
++    async fn github_request(&self, resource: &str) -> Option<Value> {
++        let resp = match self.app.base.cmd_helper.http().github_api_request(resource, 3, 0.5).await {
++            Ok(r) => r,
++            Err(e) => {
++                self.app.base.log_info(&format!("Github Request Error - {}", e.message));
++                self.st.borrow_mut().last_error = e.message;
++                return None;
++            }
++        };
++        if resp.status_code == 304 {
++            return if resp.content.is_empty() { None } else { resp.json().ok() };
++        }
++        if resp.has_error() {
++            self.app.base.log_info(&format!("Github Request Error - {}", resp.error_string()));
++            self.st.borrow_mut().last_error = resp.error_string();
++            return None;
++        }
++        self.st.borrow_mut().last_error = String::new();
++        resp.json().ok().filter(crate::pyfmt::py_truthy)
++    }
++
++    fn find_asset(&self, release: &Value) -> DlInfo {
++        let assets = release.get("assets").and_then(|a| a.as_array()).cloned().unwrap_or_default();
++        match assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(self.asset_name.as_str())) {
++            Some(a) => (
++                a.get("browser_download_url").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
++                a.get("content_type").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
++                a.get("size").and_then(|v| v.as_i64()).unwrap_or(0),
++            ),
++            None => ("?".into(), "?".into(), 0),
++        }
++    }
++
++    async fn refresh_stable(&self) {
++        let release = match self.github_request(&format!("repos/{}/releases/latest", self.repo)).await {
++            Some(r) => r,
++            None => return,
++        };
++        let mut st = self.st.borrow_mut();
++        st.remote_version = release.get("tag_name").map(crate::pyfmt::py_str).unwrap_or("?".into());
++        st.remote_hash = "?".into();
++        st.branch = release.get("target_commitish").map(crate::pyfmt::py_str).unwrap_or("?".into());
++        st.dl_info = self.find_asset(&release);
++        st.commits_behind.clear();
++        st.commits_behind_count = 0;
++    }
++
++    async fn refresh_nightly(&self) {
++        let release = match self.github_request(&format!("repos/{}/releases/tags/{}", self.repo, self.nightly_tag)).await {
++            Some(r) => r,
++            None => return,
++        };
++        {
++            let mut st = self.st.borrow_mut();
++            st.branch = release.get("target_commitish").map(crate::pyfmt::py_str).unwrap_or("?".into());
++            st.dl_info = self.find_asset(&release);
++        }
++        let commits = match self.github_request(&format!("repos/{}/commits?sha={}&per_page=1", self.repo, self.nightly_tag)).await {
++            Some(c) => c,
++            None => return,
++        };
++        let sha = commits.get(0).and_then(|c| c.get("sha")).and_then(|v| v.as_str()).unwrap_or("?");
++        let remote_hash: String = sha.chars().take(SHORT_HASH_LEN).collect();
++        let version = {
++            let mut st = self.st.borrow_mut();
++            st.remote_hash = remote_hash.clone();
++            st.remote_version = remote_hash.clone();
++            st.version.clone()
++        };
++        if version == "?" {
++            return;
++        }
++        let comparison = self.github_request(&format!("repos/{}/compare/{}...{}", self.repo, version, remote_hash)).await;
++        let mut st = self.st.borrow_mut();
++        let comparison = match comparison {
++            Some(c) => c,
++            None => {
++                if !st.last_error.is_empty() {
++                    st.commits_behind.clear();
++                    st.commits_behind_count = 0;
++                }
++                return;
++            }
++        };
++        st.commits_behind_count = comparison.get("ahead_by").and_then(|v| v.as_i64()).unwrap_or(0);
++        let new_commits = comparison.get("commits").and_then(|v| v.as_array()).cloned().unwrap_or_default();
++        let skip = new_commits.len().saturating_sub(GIT_MAX_LOG_CNT);
++        st.commits_behind = new_commits[skip..].iter().rev().map(Self::format_commit).collect();
++    }
++
++    fn format_commit(commit: &Value) -> Value {
++        let info = commit.get("commit").cloned().unwrap_or(json!({}));
++        let author = info.get("author").cloned().unwrap_or(json!({}));
++        let s = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
++        let message = s(&info, "message");
++        let (subject, body) = message.split_once('\n').unwrap_or((&message, ""));
++        let timestamp = chrono::DateTime::parse_from_rfc3339(&s(&author, "date")).map(|d| d.timestamp()).unwrap_or(0);
++        json!({
++            "sha": s(commit, "sha"),
++            "author": s(&author, "name"),
++            "date": timestamp.to_string(),
++            "subject": subject.trim(),
++            "message": body.trim(),
++            "tag": null,
++        })
++    }
++
++    fn log_app_info(&self) {
++        let st = self.st.borrow();
++        let mut warn_str = String::new();
++        if !st.warnings.is_empty() {
++            warn_str = format!("\nWarnings:\n{}", st.warnings.iter().map(|w| format!(" {}", w)).collect::<Vec<_>>().join("\n"));
++        }
++        let (dl_url, content_type, size) = &st.dl_info;
++        self.app.base.log_info(&format!(
++            "Detected\nRepo: {}\nChannel: {}\nLocal Version: {}\nRemote Version: {}\nRemote Hash: {}\nCommits Behind: {}\nValid: {}\nDownload Url: {}\nDownload Size: {}\nContent Type: {}\nRollback Version: {}{}",
++            self.repo,
++            self.app.channel.name(),
++            st.version,
++            st.remote_version,
++            st.remote_hash,
++            st.commits_behind_count,
++            crate::pyfmt::py_bool(self.app.is_valid.get()),
++            dl_url,
++            size,
++            content_type,
++            st.rollback_version,
++            warn_str
++        ));
++    }
++
++    fn update_available(&self) -> bool {
++        let st = self.st.borrow();
++        if self.app.channel == Channel::Dev {
++            return st.commits_behind_count > 0;
++        }
++        st.remote_version != "?" && st.remote_version != st.version
++    }
++
++    async fn do_update(&self, rollback_info: Option<DlInfo>) -> Result<bool, ServerError> {
++        let prefix = self.app.base.prefix.borrow().clone();
++        if self.st.borrow().reboot_pending {
++            return Err(ServerError::bad(format!("{}Reboot pending, aborting update", prefix)));
++        }
++        if !self.app.is_valid.get() {
++            return Err(ServerError::bad(format!("{}Invalid install detected, aborting update", prefix)));
++        }
++        let is_rollback = rollback_info.is_some();
++        let (dl_info, new_ver, start_msg) = match rollback_info {
++            Some(dl) => (dl, self.st.borrow().rollback_version.clone(), "Rolling Back..."),
++            None => {
++                if !self.update_available() {
++                    return Ok(false);
++                }
++                let st = self.st.borrow();
++                (st.dl_info.clone(), st.remote_version.clone(), "Updating...")
++            }
++        };
++        let (dl_url, content_type, size) = dl_info;
++        if dl_url == "?" {
++            return Err(ServerError::bad(format!("{}Release asset '{}' not found", prefix, self.asset_name)));
++        }
++        let current_version = self.st.borrow().version.clone();
++        self.app.base.notify_status(start_msg, false);
++        self.app.base.notify_status("Downloading Release...", false);
++        let ch = self.app.base.cmd_helper.clone();
++        let tempdir = ch.create_tempdir(self.app.name(), "app")?;
++        let res: Result<(), ServerError> = async {
++            let swu_file = tempdir.join(&self.asset_name);
++            ch.http()
++                .download_file(&dl_url, &content_type, Some(swu_file.clone()), size, Some(ch.on_download_progress()), DOWNLOAD_TIMEOUT, 3, 1.0)
++                .await?;
++            self.app.base.notify_status("Download Complete, installing firmware...", false);
++            let quoted = format!("'{}'", swu_file.to_string_lossy().replace('\'', "'\\''"));
++            ch.run_cmd(&format!("{} {}", self.install_cmd, quoted), INSTALL_TIMEOUT, true, 1, None, None, 1, true).await
++        }
++        .await;
++        let _ = std::fs::remove_dir_all(&tempdir);
++        res?;
++        {
++            let mut st = self.st.borrow_mut();
++            if !is_rollback {
++                st.rollback_version = current_version;
++            }
++            st.reboot_pending = true;
++        }
++        save_state(self);
++        self.app.base.notify_status(&format!("Installed version {}, rebooting...", new_ver), false);
++        // reboot once the update manager has finished reporting this update
++        let ch2 = ch.clone();
++        spawn(async move {
++            loop {
++                tokio::time::sleep(std::time::Duration::from_secs_f64(REBOOT_DELAY)).await;
++                if !ch2.is_update_busy() {
++                    break;
++                }
++            }
++            log::info!("SWUpdate: Rebooting to complete firmware update");
++            if let Some(m) = server().lookup_component::<Machine>("machine") {
++                if let Err(e) = m.get_system_provider().reboot().await {
++                    log::error!("SWUpdate: Reboot failed: {}", e.message);
++                }
++            }
++        });
++        let msg = if is_rollback { "Rollback Complete" } else { "Update Finished..." };
++        self.app.base.notify_status(msg, true);
++        Ok(true)
++    }
++}
++
++#[async_trait(?Send)]
++impl Deployer for SwuDeploy {
++    fn base(&self) -> &BaseDeploy {
++        &self.app.base
++    }
++    fn kind(&self) -> DeployKind {
++        DeployKind::Net
++    }
++    fn app(&self) -> Option<&AppDeploy> {
++        Some(&self.app)
++    }
++
++    async fn initialize(&self) -> Map<String, Value> {
++        let storage = self.app.initialize();
++        self.validate_install();
++        let s = |k: &str, d: &str| storage.get(k).and_then(|v| v.as_str()).unwrap_or(d).to_string();
++        let version_changed = {
++            let mut st = self.st.borrow_mut();
++            st.remote_version = s("remote_version", "?");
++            st.remote_hash = s("remote_hash", "?");
++            st.rollback_version = s("rollback_version", "?");
++            st.branch = s("branch", "?");
++            st.last_error = s("last_error", "");
++            st.dl_info = dl_info_from(storage.get("dl_info"));
++            st.commits_behind = storage.get("commits_behind").and_then(|v| v.as_array()).cloned().unwrap_or_default();
++            st.commits_behind_count = storage.get("cbh_count").and_then(|v| v.as_i64()).unwrap_or(0);
++            let changed = s("version", &st.version) != st.version;
++            if changed {
++                st.commits_behind.clear();
++                st.commits_behind_count = 0;
++            }
++            changed
++        };
++        if version_changed {
++            self.app.base.last_refresh_time.set(0.0);
++        }
++        if !self.app.base.needs_refresh(false) {
++            self.log_app_info();
++        }
++        storage
++    }
++
++    fn get_persistent_data(&self) -> Map<String, Value> {
++        let mut storage = self.app.get_persistent_data();
++        let st = self.st.borrow();
++        storage.insert("version".into(), json!(st.version));
++        storage.insert("remote_version".into(), json!(st.remote_version));
++        storage.insert("remote_hash".into(), json!(st.remote_hash));
++        storage.insert("rollback_version".into(), json!(st.rollback_version));
++        storage.insert("branch".into(), json!(st.branch));
++        storage.insert("dl_info".into(), json!([st.dl_info.0, st.dl_info.1, st.dl_info.2]));
++        storage.insert("commits_behind".into(), json!(st.commits_behind));
++        storage.insert("cbh_count".into(), json!(st.commits_behind_count));
++        storage.insert("last_error".into(), json!(st.last_error));
++        storage
++    }
++
++    async fn refresh(&self) -> Result<(), ServerError> {
++        self.validate_install();
++        if self.app.channel == Channel::Dev {
++            self.refresh_nightly().await;
++        } else {
++            self.refresh_stable().await;
++        }
++        self.log_app_info();
++        save_state(self);
++        Ok(())
++    }
++
++    async fn update(&self) -> Result<bool, ServerError> {
++        self.do_update(None).await
++    }
++
++    async fn rollback(&self) -> Result<bool, ServerError> {
++        let (rv, v) = {
++            let st = self.st.borrow();
++            (st.rollback_version.clone(), st.version.clone())
++        };
++        if rv == "?" || rv == v {
++            return Ok(false);
++        }
++        let release = self
++            .github_request(&format!("repos/{}/releases/tags/{}", self.repo, rv))
++            .await
++            .ok_or_else(|| ServerError::bad(format!("No release found for rollback version {}", rv)))?;
++        self.do_update(Some(self.find_asset(&release))).await
++    }
++
++    fn get_update_status(&self) -> Value {
++        let mut status = self.app.get_update_status();
++        let st = self.st.borrow();
++        let mut warnings = st.warnings.clone();
++        if st.remote_version != "?" && st.dl_info.0 == "?" {
++            warnings.push(format!("Asset '{}' not found in remote release", self.asset_name));
++        }
++        status.insert("name".into(), json!(self.app.name()));
++        status.insert("owner".into(), json!(self.owner));
++        status.insert("repo_name".into(), json!(self.project_name));
++        status.insert("version".into(), json!(st.version));
++        status.insert("remote_version".into(), json!(st.remote_version));
++        status.insert("rollback_version".into(), json!(st.rollback_version));
++        status.insert("last_error".into(), json!(st.last_error));
++        status.insert("warnings".into(), json!(warnings));
++        status.insert("anomalies".into(), json!([]));
++        if self.app.channel != Channel::Dev {
++            status.insert("configured_type".into(), json!(AppType::Web.name()));
++            return Value::Object(status);
++        }
++        let repo_url = format!("https://github.com/{}", self.repo);
++        let extra = json!({
++            "configured_type": AppType::GitRepo.name(),
++            "detected_type": AppType::GitRepo.name(),
++            "repo_detected": true,
++            "remote_alias": "origin",
++            "branch": st.branch,
++            "remote_url": repo_url,
++            "recovery_url": repo_url,
++            "current_hash": st.version,
++            "remote_hash": st.remote_hash,
++            "is_dirty": false,
++            "detached": false,
++            "commits_behind": st.commits_behind,
++            "commits_behind_count": st.commits_behind_count,
++            "git_messages": [],
++            "full_version_string": st.version,
++            "pristine": true,
++            "corrupt": false,
++        });
++        for (k, v) in extra.as_object().unwrap() {
++            status.insert(k.clone(), v.clone());
++        }
++        Value::Object(status)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn format_commit() {
++        let c = SwuDeploy::format_commit(&json!({
++            "sha": "abc",
++            "commit": {"message": "Subject\n\nBody text\n", "author": {"name": "A", "date": "2026-10-01T00:00:00Z"}}
++        }));
++        assert_eq!(c["subject"], "Subject");
++        assert_eq!(c["message"], "Body text");
++        assert_eq!(c["date"], "1790812800");
++        assert_eq!(c["author"], "A");
++    }
++}
+diff --git a/src/components/webcam.rs b/src/components/webcam.rs
+index 3674cdf..6131cfc 100644
+--- a/src/components/webcam.rs
++++ b/src/components/webcam.rs
+@@ -6,6 +6,7 @@ use crate::pyfmt::py_str;
+ use crate::server::{server, Component};
+ use async_trait::async_trait;
+ use indexmap::IndexMap;
++use regex::Regex;
+ use serde_json::{json, Map, Value};
+ use std::cell::RefCell;
+ use std::rc::Rc;
+@@ -85,7 +86,29 @@ impl WebCam {
+     }
+ 
+     pub fn as_dict(&self) -> Value {
+-        Value::Object(self.fields.borrow().clone())
++        let mut data = self.fields.borrow().clone();
++        if crate::utils::is_cosmos() {
++            for key in ["stream_url", "snapshot_url"] {
++                if let Some(Value::String(url)) = data.get(key) {
++                    let expanded = Self::expand_url(url);
++                    data.insert(key.into(), json!(expanded));
++                }
++            }
++        }
++        Value::Object(data)
++    }
++
++    /// ":8080/stream" -> default host on port 8080 (COSMOS patch to moonraker;
++    /// applied on COSMOS only, upstream Moonraker keeps the URL as given)
++    fn expand_url(url: &str) -> String {
++        static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| crate::utils::regex(r"^:(\d+)(/.*)?$"));
++        match RE.captures(url) {
++            Some(c) => {
++                let host = DEFAULT_HOST.with(|h| h.borrow().clone());
++                format!("{}:{}{}", host, &c[1], c.get(2).map(|m| m.as_str()).unwrap_or(""))
++            }
++            None => url.to_string(),
++        }
+     }
+ 
+     pub async fn get_stream_url(&self, convert_local: bool) -> Result<String, ServerError> {
+@@ -100,7 +123,7 @@ impl WebCam {
+         if url.is_empty() {
+             return Err(ServerError::bad("Empty URL Provided"));
+         }
+-        let mut url = url.to_string();
++        let mut url = if crate::utils::is_cosmos() { Self::expand_url(url) } else { url.to_string() };
+         if !crate::utils::regex(r"^\w+://[^/]+").is_match(&url) {
+             let host = DEFAULT_HOST.with(|h| h.borrow().clone());
+             url = format!("{}/{}", host, url.trim_start_matches('/'));
+@@ -555,3 +578,15 @@ impl WebcamManager {
+ pub fn load_component(config: &ConfigHelper) -> Result<Rc<WebcamManager>, crate::confighelper::ConfigError> {
+     WebcamManager::new(config)
+ }
++
++#[cfg(test)]
++mod tests {
++    #[test]
++    fn expand_url() {
++        let e = super::WebCam::expand_url;
++        assert_eq!(e(":8080/stream"), "http://127.0.0.1:8080/stream");
++        assert_eq!(e(":8080"), "http://127.0.0.1:8080");
++        assert_eq!(e("/webcam/?action=stream"), "/webcam/?action=stream");
++        assert_eq!(e("http://cam:8080/stream"), "http://cam:8080/stream");
++    }
++}
+diff --git a/src/loghelper.rs b/src/loghelper.rs
+index 34a510c..f8d7eb8 100644
+--- a/src/loghelper.rs
++++ b/src/loghelper.rs
+@@ -21,6 +21,17 @@ struct LogState {
+     structured: bool,
+     app_args: Map<String, Value>,
+     rollover_info: IndexMap<String, String>,
++    // size based rotation instead of daily (COSMOS patch to moonraker)
++    max_bytes: Option<u64>,
++}
++
++const LOG_BACKUPS: usize = 2;
++
++/// MOONRUSTER_LOG_MAX_BYTES: rotate at this size like COSMOS's moonraker,
++/// set by scripts/install-cosmos.sh
++pub fn log_max_bytes() -> Option<u64> {
++    static MAX: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
++    *MAX.get_or_init(|| std::env::var("MOONRUSTER_LOG_MAX_BYTES").ok().and_then(|v| v.parse().ok()).filter(|&b| b > 0))
+ }
+ 
+ static STATE: Mutex<Option<LogState>> = Mutex::new(None);
+@@ -109,6 +120,20 @@ impl LogState {
+     }
+ 
+     fn do_rollover(&mut self) {
++        if self.max_bytes.is_some() {
++            if let Some(fs) = self.file.as_mut() {
++                // python RotatingFileHandler: log -> log.1 -> log.2
++                fs.file = None;
++                let numbered = |i: usize| PathBuf::from(format!("{}.{}", fs.path.display(), i));
++                for i in (1..LOG_BACKUPS).rev() {
++                    let _ = std::fs::rename(numbered(i), numbered(i + 1));
++                }
++                let _ = std::fs::rename(&fs.path, numbered(1));
++                fs.file = OpenOptions::new().create(true).append(true).open(&fs.path).ok();
++            }
++            self.write_header();
++            return;
++        }
+         if let Some(fs) = self.file.as_mut() {
+             fs.file = None;
+             let suffix = fs.day.format("%Y-%m-%d").to_string();
+@@ -137,7 +162,7 @@ impl LogState {
+                     })
+                     .unwrap_or_default();
+                 backups.sort();
+-                while backups.len() > 2 {
++                while backups.len() > LOG_BACKUPS {
+                     let _ = std::fs::remove_file(backups.remove(0));
+                 }
+             }
+@@ -204,7 +229,16 @@ pub fn emit(level: log::Level, file: &str, func: &str, line: u32, msg: &str) {
+     };
+     if let Some(state) = guard.as_mut() {
+         let today = chrono::Local::now().date_naive();
+-        let need_rollover = state.file.as_ref().map(|f| f.day != today).unwrap_or(false);
++        let need_rollover = match state.max_bytes {
++            Some(max) => state
++                .file
++                .as_ref()
++                .and_then(|f| f.file.as_ref())
++                .and_then(|f| f.metadata().ok())
++                .map(|m| m.len() >= max)
++                .unwrap_or(false),
++            None => state.file.as_ref().map(|f| f.day != today).unwrap_or(false),
++        };
+         if need_rollover {
+             state.do_rollover();
+         }
+@@ -254,7 +288,7 @@ pub fn init(app_args: &Map<String, Value>) -> Option<String> {
+             }
+         }
+     }
+-    let mut state = LogState { file: file_state, structured, app_args: app_args.clone(), rollover_info: IndexMap::new() };
++    let mut state = LogState { file: file_state, structured, app_args: app_args.clone(), rollover_info: IndexMap::new(), max_bytes: log_max_bytes() };
+     if state.file.is_some() {
+         state.write_header();
+     }
+diff --git a/src/utils.rs b/src/utils.rs
+index 8466ca4..77f6a6b 100644
+--- a/src/utils.rs
++++ b/src/utils.rs
+@@ -149,6 +149,48 @@ pub fn float_value(f: f64) -> Value {
+     serde_json::Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null)
+ }
+ 
++/// Whether this is a COSMOS printer (OpenCentauri: /etc/os-release ID=cosmos),
++/// or a system derived from it that says so the os-release way (ID_LIKE
++/// lists cosmos: Rusticc, the Rust port of COSMOS, can set ID=rusticc
++/// ID_LIKE=cosmos). COSMOS's own Moonraker carries patches (web_client,
++/// webcam_redirect, the sysvinit provider, swupdate updates, ":port" webcam
++/// URLs) that upstream Moonraker does not have: Moonruster behaves like each
++/// one on its platform. MOONRUSTER_COSMOS=1/0 overrides the detection.
++pub fn is_cosmos() -> bool {
++    static COSMOS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *COSMOS.get_or_init(|| match std::env::var("MOONRUSTER_COSMOS").as_deref() {
++        Ok("1") => true,
++        Ok("0") => false,
++        _ => std::fs::read_to_string("/etc/os-release").map(|s| os_release_is_cosmos(&s)).unwrap_or(false),
++    })
++}
++
++/// ID=cosmos, or cosmos in the space-separated ID_LIKE (os-release(5))
++fn os_release_is_cosmos(text: &str) -> bool {
++    text.lines().any(|l| {
++        let Some((key, val)) = l.trim().split_once('=') else { return false };
++        let val = val.trim_matches('"').trim_matches('\'');
++        match key {
++            "ID" => val == "cosmos",
++            "ID_LIKE" => val.split_whitespace().any(|v| v == "cosmos"),
++            _ => false,
++        }
++    })
++}
++
++#[cfg(test)]
++mod cosmos_tests {
++    #[test]
++    fn os_release() {
++        let t = super::os_release_is_cosmos;
++        assert!(t("ID=cosmos\nNAME=\"OpenCentauri Cosmos\""));
++        assert!(t("ID=\"cosmos\""));
++        assert!(t("ID=rusticc\nID_LIKE=\"cosmos openembedded\""));
++        assert!(!t("ID=ubuntu\nID_LIKE=debian"));
++        assert!(!t("ID=cosmosx"));
++    }
++}
++
+ pub fn home_dir() -> PathBuf {
+     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| {
+         unsafe {
