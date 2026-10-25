@@ -6,6 +6,7 @@
 # texts naming the API server say Moonruster. Every edit
 # must find its anchor: another Mainsail version fails here, not silently.
 #   apply-rusticc-mainsail-theme.py <webroot> <theme files dir>
+import hashlib
 import json
 import re
 import shutil
@@ -61,6 +62,45 @@ def patch_index_html(webroot):
     path.write_text(text, encoding="utf-8")
 
 
+def add_panel_loader(webroot):
+    # The panel extender's loader (served from /addons by Moonruster's
+    # addons_path): Rusticc's timelapse panels and other addons' panels
+    path = webroot / "index.html"
+    text = path.read_text(encoding="utf-8")
+    text = sub_once(text, r"</head>", '<script src="/addons/loader.js" defer></script></head>', path)
+    path.write_text(text, encoding="utf-8")
+
+
+# The service worker precaches Mainsail's files by revision (their md5, or
+# null for the hash-named bundles): a file edited here keeps its old
+# revision, and a browser that cached Mainsail keeps serving the old copy.
+# Every precached file this script changes gets its new md5 as revision.
+PRECACHE_ENTRY = r'\{url:"([^"]+)",revision:(?:"[0-9a-f]*"|null)\}'
+
+
+def md5s(webroot):
+    sw = (webroot / "sw.js").read_text(encoding="utf-8")
+    out = {}
+    for url in re.findall(PRECACHE_ENTRY, sw):
+        f = webroot / url
+        if f.is_file():
+            out[url] = hashlib.md5(f.read_bytes()).hexdigest()
+    return out
+
+
+def bump_precache(webroot, before):
+    path = webroot / "sw.js"
+    sw = path.read_text(encoding="utf-8")
+    after = md5s(webroot)
+    changed = [u for u in after if after[u] != before.get(u)]
+    if "index.html" not in changed:
+        raise RuntimeError("sw.js: index.html not found in the precache list")
+    for url in changed:
+        sw = sub_once(sw, r'\{url:"%s",revision:(?:"[0-9a-f]*"|null)\}' % re.escape(url),
+                      '{url:"%s",revision:"%s"}' % (url, after[url]), path)
+    path.write_text(sw, encoding="utf-8")
+
+
 def patch_manifest(webroot):
     path = webroot / "manifest.webmanifest"
     manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -113,12 +153,15 @@ def install_files(webroot, files):
 
 def main():
     webroot, files = Path(sys.argv[1]), Path(sys.argv[2])
+    before = md5s(webroot)
     add_theme(webroot)
     set_default_theme(webroot)
     patch_index_html(webroot)
     patch_manifest(webroot)
     name_server(webroot)
     install_files(webroot, files)
+    add_panel_loader(webroot)
+    bump_precache(webroot, before)
 
 
 if __name__ == "__main__":

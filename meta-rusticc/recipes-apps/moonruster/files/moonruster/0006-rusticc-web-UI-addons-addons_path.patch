@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sun, 25 Oct 2026 23:13:48 +0200
+Subject: [PATCH 6/6] rusticc: web UI addons (addons_path)
+
+The [server] option addons_path (one root per line) serves web UI addon
+files at /addons/* from the first root that has them (no-cache) and
+/addons/manifest.json, the panels found as <root>/panels/<name>/panel.js
+in any root (first root wins a name, sorted): what the Mainsail panel
+extender's loader reads. Port of the Moonraker patch 'Serve web UI addon
+panels' (OpenCentauri/cosmos#298, abd18ce); paths with anything but
+normal segments are a 404.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017xQsBSvb6emYLfnWCbF3jA
+---
+ src/components/application/handlers.rs | 61 ++++++++++++++++++++++++++
+ src/components/application/mod.rs      | 16 +++++++
+ 2 files changed, 77 insertions(+)
+
+diff --git a/src/components/application/handlers.rs b/src/components/application/handlers.rs
+index 6f894ec..2182374 100644
+--- a/src/components/application/handlers.rs
++++ b/src/components/application/handlers.rs
+@@ -122,6 +122,11 @@ impl MoonrakerApp {
+                         let sub = m.path_args.first().cloned().flatten().unwrap_or_default();
+                         (Self::webcam_redirect(&info, &upstream, &sub), None)
+                     }
++                    HandlerKind::AddonFile { roots } => {
++                        let sub = m.path_args.first().cloned().flatten().unwrap_or_default();
++                        (Self::addon_file(&info, &roots, &sub), None)
++                    }
++                    HandlerKind::AddonManifest { roots } => (Self::addon_manifest(&info, &roots), None),
+                 },
+             }
+         };
+@@ -551,6 +556,62 @@ impl MoonrakerApp {
+         }
+     }
+ 
++    /// A web UI addon file (loader, panel scripts and their assets) from
++    /// the first addons_path root that has it
++    fn addon_file(req: &HttpRequest, roots: &[String], path: &str) -> HttpResponse {
++        if req.method != "GET" {
++            return error_response(&HttpError::new(405), None);
++        }
++        let rel = percent_encoding::percent_decode_str(path).decode_utf8_lossy().to_string();
++        let rel = Path::new(&rel);
++        if rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
++            return error_response(&HttpError::new(404), None);
++        }
++        for root in roots {
++            let full = Path::new(root).join(rel);
++            if !full.is_file() {
++                continue;
++            }
++            return match std::fs::read(&full) {
++                Ok(data) => {
++                    let ctype = crate::pymimetypes::guess_type(&full.to_string_lossy()).0;
++                    let mut resp = HttpResponse::new(200);
++                    resp.set_header("Content-Type", ctype.unwrap_or_else(|| "application/octet-stream".into()));
++                    // addon files are small and change on updates
++                    resp.set_header("Cache-Control", "no-cache");
++                    resp.set_body(data);
++                    resp
++                }
++                Err(_) => error_response(&HttpError::new(500), None),
++            };
++        }
++        error_response(&HttpError::new(404), None)
++    }
++
++    /// The installed addon panels: <root>/panels/<name>/panel.js of every
++    /// root, the first root winning a name, sorted by name
++    fn addon_manifest(req: &HttpRequest, roots: &[String]) -> HttpResponse {
++        if req.method != "GET" {
++            return error_response(&HttpError::new(405), None);
++        }
++        let mut panels = std::collections::BTreeMap::new();
++        for root in roots {
++            let Ok(dir) = std::fs::read_dir(Path::new(root).join("panels")) else { continue };
++            for entry in dir.flatten() {
++                let name = entry.file_name().to_string_lossy().to_string();
++                if !panels.contains_key(&name) && entry.path().join("panel.js").is_file() {
++                    let script = format!("/addons/panels/{}/panel.js", name);
++                    panels.insert(name.clone(), json!({"name": name, "script": script}));
++                }
++            }
++        }
++        let mut resp = HttpResponse::new(200);
++        resp.set_header("Content-Type", "application/json; charset=UTF-8");
++        resp.set_header("Cache-Control", "no-cache");
++        resp.set_body(json!({"panels": panels.into_values().collect::<Vec<_>>()}).to_string());
++        resp
++    }
++
+     fn webcam_redirect(req: &HttpRequest, upstream: &str, path: &str) -> HttpResponse {
+         if req.method != "GET" {
+             return error_response(&HttpError::new(405), None);
+diff --git a/src/components/application/mod.rs b/src/components/application/mod.rs
+index 2c42350..c09252c 100644
+--- a/src/components/application/mod.rs
++++ b/src/components/application/mod.rs
+@@ -62,6 +62,9 @@ pub enum HandlerKind {
+     // web_client / webcam_redirect (COSMOS patch to moonraker)
+     WebClientRoot { path: String },
+     WebcamRedirect { upstream: String },
++    // addons_path (Rusticc): web UI addon panels and their manifest
++    AddonFile { roots: Rc<Vec<String>> },
++    AddonManifest { roots: Rc<Vec<String>> },
+ }
+ 
+ struct Rule {
+@@ -171,6 +174,13 @@ impl MoonrakerApp {
+             }
+         }
+         let webcam_redirect = if cosmos { config.get_opt("webcam_redirect")? } else { None };
++        // Web UI addons (dashboard / page panels for the panel extender
++        // loader): one root per line, the image's first, then writable
++        // storage for runtime-installed addons. Checked per request.
++        let addon_roots: Vec<String> = config
++            .get_opt("addons_path")?
++            .map(|v| v.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| utils::expand_user(l).to_string_lossy().to_string()).collect())
++            .unwrap_or_default();
+         let app = Rc::new(MoonrakerApp {
+             json_rpc: json_rpc.clone(),
+             api_cache: RefCell::new(HashMap::new()),
+@@ -195,6 +205,12 @@ impl MoonrakerApp {
+         if let Some(upstream) = webcam_redirect {
+             app.add_handler("/webcam/?(.*)", HandlerKind::WebcamRedirect { upstream: upstream.trim_end_matches('/').to_string() });
+         }
++        if !addon_roots.is_empty() {
++            log::info!("Web UI addons enabled, roots: {}", addon_roots.join(", "));
++            let roots = Rc::new(addon_roots);
++            app.add_handler("/addons/manifest.json", HandlerKind::AddonManifest { roots: roots.clone() });
++            app.add_handler("/addons/(.*)", HandlerKind::AddonFile { roots });
++        }
+         app.add_handler(&format!("{}/server/redirect", route_prefix), HandlerKind::Redirect);
+         app.add_handler(&format!("{}/server/jsonrpc", route_prefix), HandlerKind::Rpc);
+         srv.register_component("jsonrpc", json_rpc).map_err(crate::confighelper::ConfigError::from)?;

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 21:11:39 +0200
-Subject: [PATCH 5/5] rusticc: timelapse, moonraker-timelapse ported to Rust
+Subject: [PATCH 5/6] rusticc: timelapse, moonraker-timelapse ported to Rust
 
 A built-in timelapse component with moonraker-timelapse c7fff11's API and
 behaviour (component/timelapse.py): the /machine/timelapse/* endpoints,

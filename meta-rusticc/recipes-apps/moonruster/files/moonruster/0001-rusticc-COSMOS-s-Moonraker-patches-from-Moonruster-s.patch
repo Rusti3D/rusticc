@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 05:01:33 +0200
-Subject: [PATCH 1/5] rusticc: COSMOS's Moonraker patches (from Moonruster's
+Subject: [PATCH 1/6] rusticc: COSMOS's Moonraker patches (from Moonruster's
  cosmos branch)
 
 swu_deploy (SWUDeploy), log rotation at 5 MB (MOONRUSTER_LOG_MAX_BYTES),

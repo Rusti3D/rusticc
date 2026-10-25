@@ -5,4 +5,5 @@ SRC_URI += " \
     file://moonruster/0003-rusticc-Moonruster-s-update-entry-as-COSMOS-s-Moonra.patch \
     file://moonruster/0004-rusticc-the-logs-name-the-server-Moonruster.patch \
     file://moonruster/0005-rusticc-timelapse-moonraker-timelapse-ported-to-Rust.patch \
+    file://moonruster/0006-rusticc-web-UI-addons-addons_path.patch \
 "
