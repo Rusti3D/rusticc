@@ -34,7 +34,7 @@ The board configs are COSMOS's (kaliru's `firmware/configs/cosmos-*`, from `conf
 
 | config | MCU | requests + dictionary | emulator (`tests/emu_cmp.sh`) |
 |---|---|---|---|
-| cosmos-cc1-dsp (mainboard) | HiFi4 600 MHz | identical | no Xtensa model: on the printer, see below |
+| cosmos-cc1-dsp (mainboard) | HiFi4 600 MHz | identical | no Xtensa model; **on the CC1 (2026-10-25): boots, same dictionary, stock klippy + the user's config reach ready on it** |
 | cosmos-cc1-bed / toolhead / canvas | STM32F401 | identical | cc1-bed 8/8 |
 | cosmos-cc2-bed / toolhead / canvas | STM32F103 | identical | cc2-canvas 8/8 (RS-485 DE accesses identical) |
 | cosmos-afc-lite-usb | STM32H723 | identical | 8/8 |
