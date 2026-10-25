@@ -20,4 +20,5 @@ SRC_URI += " \
     file://kaliru/0018-rusticc-errors-reach-the-flash-at-once-log-fdatasync.patch \
     file://kaliru/0019-rusticc-drop-the-timed-log-rotation-COSMOS-replaced-.patch \
     file://kaliru/0020-rusticc-clippy-in-the-profiler-and-git-status-helper.patch \
+    file://kaliru/0021-rusticc-native-AFC-for-COSMOS-s-stock-Canvas.patch \
 "

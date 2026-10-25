@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sat, 24 Oct 2026 21:05:41 +0300
-Subject: [PATCH 07/20] rusticc: pcprof dump has glibc mallinfo2; memmap.sh
+Subject: [PATCH 07/21] rusticc: pcprof dump has glibc mallinfo2; memmap.sh
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

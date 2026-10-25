@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 25 Oct 2026 13:19:35 +0200
-Subject: [PATCH 16/20] rusticc: canvas_filament_sensor (COSMOS, CC2 RS-485
+Subject: [PATCH 16/21] rusticc: canvas_filament_sensor (COSMOS, CC2 RS-485
  filament sensor)
 
 The sensor as a pin chip answering buttons' MCU calls itself:

@@ -1,0 +1,11 @@
+# One command per Canvas run after PREP: each ends the batch run with a gcode
+# error (Python AFC, empty lanes). Not here: LANE_UNLOAD and HUB_CUT_TEST wait
+# for drv8833 moves the batch-mode MCU never completes; AFC_STATS (before a
+# print, afc_stats is unset) shuts the printer down.
+AFC_M104 S200
+AFC_CANVAS_TOOL_LOAD
+AFC_CANVAS_TOOL_UNLOAD
+AFC_HAPPY_P
+TOOL_LOAD LANE=CANVAS_1
+SET_BOWDEN_LENGTH UNIT=CANVAS_1 LENGTH=50
+AFC_STATS

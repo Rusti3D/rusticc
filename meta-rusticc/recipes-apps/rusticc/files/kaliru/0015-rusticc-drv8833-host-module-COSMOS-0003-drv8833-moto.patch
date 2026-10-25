@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 25 Oct 2026 13:19:35 +0200
-Subject: [PATCH 15/20] rusticc: drv8833 host module (COSMOS
+Subject: [PATCH 15/21] rusticc: drv8833 host module (COSMOS
  0003-drv8833-motor-control)
 
 [drv8833 NAME]: CANVAS lane motors with the MCU's hall-sensor PID; the commands

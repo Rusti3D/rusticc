@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 00:58:03 +0300
-Subject: [PATCH 12/20] rusticc: KALIRU_TRIM_TEXT (resident code = working set
+Subject: [PATCH 12/21] rusticc: KALIRU_TRIM_TEXT (resident code = working set
  after startup), api/status profile scopes; run script trims after 120 s
 
 Measured on the CC1 idle: RSS 33.9 -> 30.7 MB, PSS 32.2 -> 28.9 MB (stock

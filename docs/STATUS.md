@@ -3,6 +3,15 @@
 Rusticc is COSMOS (OpenCentauri's firmware for the Elegoo Centauri Carbon) with Kalico replaced by Kaliru, the Rust port of Kalico.
 Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
 
+## Queue (user, 2026-10-25, in order)
+
+- [x] Full AFC parity where Rusticc needs it: native AFC for COSMOS's stock Canvas (patch 0021, docs/AFC_PORT.md).
+  9/9 batch Canvas runs identical (`tools/canvas_cmp.sh`); drv8833 lane moves can't run in batch (no MCU replies).
+- [ ] A native Rust AFC build for cosmoace_afc (AFC_ACE, the user's CC1 config).
+- [ ] Then the real Rusticc build, for the user to try on the printer (install only with their go).
+- [ ] Address any issues; then full AFC parity as its own project (rust afc).
+- [ ] Gaps in Rusticc / kaliru: camera support, "nothing should be breaking on my cc1".
+
 ## How the code is organised
 
 - kaliru (github.com/Rusti3D/kaliru) is Kalico in Rust, identical to Kalico. Rusticc's changes to it are the patch
@@ -18,8 +27,8 @@ Ported and checked against the COSMOS reference (`tools/ref_setup.sh`, then `too
 the host patches 0001-remove-save-config-subfile-check, 0002-reduce-calibration-difference-tolerance,
 0001-Reduce-log-rotate-threshold, 0001-implement-pulldown-resistor-in-thermistor-calc, 0001-probe-home-z-includes-z-offset,
 0001-force-specific-input-shaper, 0004-allow-config-exclude, and the hx711s/hx717s load cell (0007). The full case set
-(Kalico tests + kaliru cases + Rusticc cases) is 170/171 identical (printers/13 is a known timing case); the CC1
-config and the plugin cases are identical too. The tree is kaliru main 4120f4f + patches 0001-0020.
+(Kalico tests + kaliru cases + Rusticc cases) is 171/172 identical (printers/13 is a known timing case); the CC1
+config and the plugin cases are identical too. The tree is kaliru main ce214e3 + patches 0001-0021.
 
 `tools/cc1_cmp.sh` runs the user's CC1 config (AFC, AFC_ACE, knock) in batch mode with the printer's own MCU
 dictionaries (`dicts/`). Startup is identical to COSMOS. `CANVAS=1 tools/cc1_cmp.sh cases/cc1_canvas.gcode` runs

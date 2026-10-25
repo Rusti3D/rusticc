@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 25 Oct 2026 13:35:34 +0200
-Subject: [PATCH 18/20] rusticc: errors reach the flash at once (log fdatasync
+Subject: [PATCH 18/21] rusticc: errors reach the flash at once (log fdatasync
  after ERROR lines)
 
 A shutdown's cause was lost when the printer was power-cycled right after

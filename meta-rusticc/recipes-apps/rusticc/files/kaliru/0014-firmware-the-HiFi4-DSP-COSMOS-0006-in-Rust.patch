@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 03:32:54 +0200
-Subject: [PATCH 14/20] firmware: the HiFi4 DSP (COSMOS 0006) in Rust
+Subject: [PATCH 14/21] firmware: the HiFi4 DSP (COSMOS 0006) in Rust
 
 The CC1's mainboard MCU: src/hifi4 (the board, RPMsg over the msgbox, the
 resource table, the trace log, startup and vectors as global_asm!) and

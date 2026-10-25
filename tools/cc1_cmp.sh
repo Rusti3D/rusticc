@@ -41,6 +41,8 @@ stage() {
         echo "[include ../extras-readonly/canvas.cfg]" >> $STAGE/config/klipper-readonly/zextras.cfg
         sed -i "/^\[canvas_rfid CANVAS_1\]/a openrfid_path: $HOME/rk/openrfid/src" $STAGE/config/extras-readonly/canvas.cfg
         dicts="$dicts canvas=cc1_canvas.dict"
+        # a fresh install's AFC state, not the user's ACE lanes
+        echo "{}" > $STAGE/config/AFC.var.unit
     fi
     {
         echo "CONFIG config/printer.cfg"
@@ -52,10 +54,10 @@ stage() {
 EXTRA=${1:+$(realpath "$1")}
 rm -rf ~/rk/cc1_py ~/rk/cc1_rs
 stage
-python3 tools/refrun.py --out ~/rk/cc1_py --cwd $REF --klippy "$HOME/rk/venv315/bin/python -m klippy" $STAGE/cc1.test < /dev/null | tail -1
+python3 tools/refrun.py --timeout ${TIMEOUT:-600} --out ~/rk/cc1_py --cwd $REF --klippy "$HOME/rk/venv315/bin/python -m klippy" $STAGE/cc1.test < /dev/null | tail -1
 stage
 KALIRU_KLIPPY_DIR=$REF/klippy \
 KALIRU_LIBPYTHON=${KALIRU_LIBPYTHON:-$HOME/.local/share/uv/python/cpython-3.15-linux-x86_64-gnu/lib/libpython3.15.so.1.0} \
 PYTHONPATH=$HOME/rk/venv315/lib/python3.15/site-packages \
-python3 tools/refrun.py --out ~/rk/cc1_rs --klippy "${KALIRU_BIN:-$HOME/rk/target-rusticc/release/kaliru}" $STAGE/cc1.test < /dev/null | tail -1
+python3 tools/refrun.py --timeout ${TIMEOUT:-600} --out ~/rk/cc1_rs --klippy "${KALIRU_BIN:-$HOME/rk/target-rusticc/release/kaliru}" $STAGE/cc1.test < /dev/null | tail -1
 python3 tools/refdiff.py ~/rk/cc1_py ~/rk/cc1_rs

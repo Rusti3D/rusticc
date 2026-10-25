@@ -165,3 +165,14 @@ line saying why), so an ACE / BoxTurtle / toolchanger setup keeps working.
   cannot match natively) and AFC_error's it; next_lane_load = None in finally.
 - afcDeltaTime, AFC.log times and moonraker tracebacks are wall clock / Python
   stacks: AFC.log comparison normalises them.
+
+## Found on the way
+- Python AFC with the stock Canvas config does not start on Rusticc today: the
+  plugin layer does not mirror `PrinterPins.setup_pin` (AFC_canvas's enable
+  pins, AFC_canvas_lane's LED pins; also BoxTurtle espoolers). A genuine kaliru
+  fix: setup_pin plus MCU_digital_out / MCU_pwm wrappers (setup_start_value,
+  setup_cycle_time, setup_max_duration, set_digital, set_pwm, get_mcu, and a
+  settable `last_set_time`). Queued after the native port's first parity run.
+- Without a log file (batch tests) AFC logs through the root logger, so its
+  lines are in klippy.log; Python tracebacks inside them (CalledProcessError
+  from print_version's git calls) need frame normalisation in refdiff.

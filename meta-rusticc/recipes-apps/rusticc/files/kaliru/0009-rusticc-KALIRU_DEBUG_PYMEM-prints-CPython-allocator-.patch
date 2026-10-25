@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sat, 24 Oct 2026 21:17:51 +0300
-Subject: [PATCH 09/20] rusticc: KALIRU_DEBUG_PYMEM prints CPython allocator
+Subject: [PATCH 09/21] rusticc: KALIRU_DEBUG_PYMEM prints CPython allocator
  stats (debugging)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sat, 24 Oct 2026 21:23:29 +0300
-Subject: [PATCH 10/20] rusticc: debug_pymem tracemalloc top files (debugging)
+Subject: [PATCH 10/21] rusticc: debug_pymem tracemalloc top files (debugging)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
