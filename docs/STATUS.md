@@ -32,6 +32,10 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
   Rust-AFC's config/ace in extras-readonly/afc-ace/, the camera at 1280x720/15 fps and the trim (no Fluidd,
   AtomScreen, Doom; UI fallbacks), Moonruster as before (no timelapse yet: the Moonruster session's). Not installed: the
   CC1 was printing; the user decides.
+- [x] Installed on the user's CC1 (2026-10-25, user's go): image 3904616fee (swu f53fcb6a) on slot B, slot A
+  kept as stock COSMOS 20b31d0226 (booted A, flashed B). Klipper ready (App Name Rusticc, no errors), boards
+  on .rusticc.48b5fc7, native AFC 4/4 lanes SPOOL READY without libpython, RSS rusticc 12 MB / moonruster
+  18 MB, MemAvailable 68 MB, camera 1280x720 (snapshot 136 KB), no /usr/share/moonraker.
 - [ ] Image space (user, 2026-10-25): the root slot is fixed at 131125 KiB (~134.3 MB, the stock eMMC layout
   COSMOS keeps: rootfsA/B, 8 GB eMMC with ~6.9 GB UDISK at /user-resource); image 59fb371c7c's squashfs is
   117.8 MB, 262 MB unpacked, of which /usr/lib/python3.15 is 125 MB.
