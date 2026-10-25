@@ -2,7 +2,8 @@
 # Rusticc's theme for Mainsail (2.19.0, COSMOS's version), applied to the
 # installed web root as COSMOS applies its Fluidd theme: a "rusticc" entry in
 # Mainsail's built-in theme list (its sidebar logo and rust accent), made the
-# default theme; the page title, icons and manifest name Rusticc. Every edit
+# default theme; the page title, icons and manifest name Rusticc, and the
+# texts naming the API server say Moonruster. Every edit
 # must find its anchor: another Mainsail version fails here, not silently.
 #   apply-rusticc-mainsail-theme.py <webroot> <theme files dir>
 import json
@@ -70,6 +71,38 @@ def patch_manifest(webroot):
     path.write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
 
 
+# Rusticc's API server is Moonruster: the English texts that name the server,
+# and the labels Mainsail writes itself. Keys, the moonraker.conf file name,
+# service and component names are left as they are.
+SERVER_NAME = "Moonruster"
+EN_SERVER_TEXTS = 12
+SERVER_LABELS = (
+    "this.moonrakerInstance?`Moonraker`:",
+    "{service:`Moonraker`}",
+    "serviceName:`Moonraker`",
+)
+
+
+def name_server(webroot):
+    en = list((webroot / "assets").glob("en-*.js"))
+    if len(en) != 1:
+        raise RuntimeError(f"the English locale is in {len(en)} bundles, expected 1")
+    text = en[0].read_text(encoding="utf-8")
+    # "Moonraker" as a word: not a key such as MoonrakerLog
+    text, n = re.subn(r"(?<![A-Za-z_])Moonraker(?![A-Za-z_])", SERVER_NAME, text)
+    if n != EN_SERVER_TEXTS:
+        raise RuntimeError(f"{en[0]}: {n} English texts name Moonraker, expected {EN_SERVER_TEXTS}")
+    en[0].write_text(text, encoding="utf-8")
+    for label in SERVER_LABELS:
+        hits = [p for p in (webroot / "assets").glob("index-*.js") if label in p.read_text(encoding="utf-8")]
+        if len(hits) != 1:
+            raise RuntimeError(f"{label!r}: in {len(hits)} bundles, expected 1")
+        text = hits[0].read_text(encoding="utf-8")
+        if text.count(label) != 1:
+            raise RuntimeError(f"{hits[0]}: {label!r} {text.count(label)} times, expected 1")
+        hits[0].write_text(text.replace(label, label.replace("Moonraker", SERVER_NAME)), encoding="utf-8")
+
+
 def install_files(webroot, files):
     shutil.copy(files / "sidebarLogo-rusticc.svg", webroot / "img/themes/sidebarLogo-rusticc.svg")
     for name in ("favicon-16x16.png", "favicon-32x32.png", "apple-touch-icon-180x180.png"):
@@ -84,6 +117,7 @@ def main():
     set_default_theme(webroot)
     patch_index_html(webroot)
     patch_manifest(webroot)
+    name_server(webroot)
     install_files(webroot, files)
 
 
