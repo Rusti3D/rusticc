@@ -35,13 +35,15 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
 - [ ] Image space (user, 2026-10-25): the root slot is fixed at 131125 KiB (~134.3 MB, the stock eMMC layout
   COSMOS keeps: rootfsA/B, 8 GB eMMC with ~6.9 GB UDISK at /user-resource); image 59fb371c7c's squashfs is
   117.8 MB, 262 MB unpacked, of which /usr/lib/python3.15 is 125 MB.
-  - Now (user: Moonraker "shouldn't ship with rusticc at all"): drop /usr/share/moonraker and Moonraker's python
+  - Done (image 3904616fee, squashfs 117.8 -> 102.8 MB, 262 -> 219 MB unpacked; repack.sh, the kalico bbappend
+    and the Moonruster session's moonraker bbappend 3904616: Moonruster only, no /usr/share/moonraker): dropped /usr/share/moonraker and Moonraker's python
     packages (aiofiles apprise dbus_fast distro importlib_metadata zipp inotify_simple ldap3 libnacl paho_mqtt
     periphery pillow preprocess_cancellation pyserial_asyncio smart_open streaming_form_data tornado uvloop
     zeroconf ifaddr, and the unclaimed pyyaml certifi pycurl async_timeout aenum msgpack tomli tomli_w), ~30 MB
     unpacked; also greenlet, msgspec, python-can + packaging + typing_extensions + wrapt (~6 MB): kaliru
-    imports none of them and no plugin in the corpus does. Waiting on the Moonruster session: does Moonruster
-    load python Moonraker components that need any of them?
+    imports none of them and no plugin in the corpus does. Not shipped with it: [notifier] (apprise) and
+    third-party python Moonraker components. Checked on the image (qemu): the kept packages and the stdlib
+    import, and rusticc runs kaliru's test python plugin.
   - Kept for python plugin compatibility (imported by plugins, not by kaliru): the stdlib + libpython, numpy
     35 MB (Shake&Tune, Beacon, Cartographer, Happy Hare), pyserial (Happy Hare, cosmoace_afc), jinja2 +
     markupsafe (Happy Hare), cffi + pycparser (chelper.get_ffi users).
