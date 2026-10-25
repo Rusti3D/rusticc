@@ -26,7 +26,8 @@ layout and macro names.
   At the first boot the bed and toolhead boards are flashed with Rusticc's MCU firmware (the same check COSMOS
   uses: their firmware version differs); the mainboard DSP loads Rusticc's firmware from the image.
 - **Check what runs:** the login banner and `/etc/os-release` say Rusticc; `klippy.log` starts with
-  `App Name: Rusticc`; Mainsail / Fluidd show the Rusticc version.
+  `App Name: Rusticc`; Mainsail shows the Rusticc version (Rusticc ships Mainsail and GrumpyScreen only:
+  no Fluidd, AtomScreen or Doom).
 - **Updates:** the web UI's update manager and `check-update` look at github.com/Rusti3D/rusticc releases
   (`check_for_updates` in `cosmos.conf` turns this off).
 - **Going back to COSMOS:** install a COSMOS `.swu` the same way (`flash cosmos-centauri-carbon-1.swu`); its first

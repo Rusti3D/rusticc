@@ -42,7 +42,10 @@ case "$1" in
             rm -f /etc/webui
         fi
 
-        ln -sf "/var/www/$(config-manager ui web_ui)/" /etc/webui
+        # Rusticc ships Mainsail only: a printer set to another web UI gets it
+        WEB_UI="$(config-manager ui web_ui)"
+        [ -d "/var/www/$WEB_UI" ] || WEB_UI=mainsail
+        ln -sf "/var/www/$WEB_UI/" /etc/webui
 
         start-stop-daemon -S -b -m -p $PIDFILE \
             -x $MOONRAKER_EXEC -- $MOONRAKER_ARGS
