@@ -2,13 +2,13 @@ SUMMARY = "Rusticc's Moonraker: Moonruster with COSMOS's patches"
 DESCRIPTION = "Moonruster (Moonraker ported to Rust) with Rusticc's patches: COSMOS's Moonraker additions (SWUpdate updates, 5 MB log rotation, static web client, webcam ports, sysvinit provider); python components run on the image's CPython."
 HOMEPAGE = "https://github.com/Rusti3D/moonruster"
 LICENSE = "GPL-3.0-only"
-LIC_FILES_CHKSUM = "file://Cargo.toml;beginline=6;endline=6;md5=a74e7d3482a2d6f20b33af57f6e99553"
+LIC_FILES_CHKSUM = "file://LICENSE;md5=db95b6e40dc7d26d8308b6b7375637b6"
 
-# Moonruster (branch plugins until it merges into main) with Rusticc's
+# Moonruster (main) with Rusticc's
 # patches, as COSMOS builds Moonraker with its own: files/moonruster, listed
 # by moonruster-patches.inc (tools/moonruster-tree.sh / moonruster-export.sh)
-SRC_URI = "git://github.com/Rusti3D/moonruster.git;protocol=https;branch=plugins"
-SRCREV = "df8eee16013839ed0af9f99cc6a8fa86422c76f4"
+SRC_URI = "git://github.com/Rusti3D/moonruster.git;protocol=https;branch=main"
+SRCREV = "0f7a56ecb2d5bc2fb20f0b644a81a21710c1be3d"
 PV = "0.1.0+git"
 
 require moonruster-patches.inc
