@@ -25,11 +25,17 @@ case "$1" in
         sleep 2
         echo "state: $(cat $RP/state) firmware: $(cat $RP/firmware)"
         trace
-        python3 $D/mcu_identify.py /dev/ttyRPMSG0 > $D/dsp_dict.json && echo "dictionary: $D/dsp_dict.json"
+        # (the tty appears once the firmware announces its channel, with a
+        # new index after a firmware switch)
+        i=0
+        while ! ls /dev/ttyRPMSG* > /dev/null 2>&1 && [ $i -lt 20 ]; do sleep 1; i=$((i + 1)); done
+        tty=$(ls /dev/ttyRPMSG* | tail -1)
+        python3 $D/mcu_identify.py $tty > $D/dsp_dict.json && echo "dictionary ($tty): $D/dsp_dict.json"
         ;;
     stock)
         /etc/init.d/klipper-firmware-dsp stop
-        echo -n "" > /sys/module/firmware_class/parameters/path
+        # (an empty write leaves the old path set: a newline clears it)
+        echo > /sys/module/firmware_class/parameters/path
         echo rproc-1700000.dsp-fw > $RP/firmware
         /etc/init.d/klipper-firmware-dsp start
         sleep 2
