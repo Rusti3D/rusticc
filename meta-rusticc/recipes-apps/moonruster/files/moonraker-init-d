@@ -9,7 +9,7 @@
 ### END INIT INFO
 
 MOONRAKER_EXEC="/usr/bin/moonruster"
-MOONRAKER_ARGS="-d /etc/klipper -l /board-resource/moonraker.log -u /run/moonraker.sock"
+MOONRAKER_ARGS="-d /etc/klipper -l /board-resource/moonruster.log -u /run/moonraker.sock"
 PIDFILE="/var/run/moonraker.pid"
 ASVC_OVERLAY="/data/overlay-etc/upper/klipper/moonraker.asvc"
 ASVC_DEFAULT="/usr/share/moonraker/moonraker/assets/default_allowed_services"

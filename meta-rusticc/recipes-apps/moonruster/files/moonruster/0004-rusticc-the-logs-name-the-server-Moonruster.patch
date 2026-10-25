@@ -1,0 +1,267 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sun, 25 Oct 2026 18:58:48 +0200
+Subject: [PATCH 4/4] rusticc: the logs name the server Moonruster
+
+Human-readable log, warning and message texts that name the running
+server say Moonruster, and 'See moonraker.log' points at moonruster.log
+(the init's log file). Identifiers stay Moonraker's: moonraker.conf,
+moonraker.sock, the moonraker service, database namespaces, the JWT
+audience, client_info/user agent, zeroconf/SSDP names, the
+/server/files/moonraker.log endpoint and texts about Moonraker's docs
+or its Python plugin API.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017xQsBSvb6emYLfnWCbF3jA
+---
+ src/components/analysis.rs                  | 2 +-
+ src/components/application/handlers.rs      | 6 +++---
+ src/components/application/mod.rs           | 6 +++---
+ src/components/authorization/mod.rs         | 2 +-
+ src/components/dbus_manager.rs              | 2 +-
+ src/components/file_manager/mod.rs          | 2 +-
+ src/components/file_manager/observer/mod.rs | 2 +-
+ src/components/klippy_connection.rs         | 2 +-
+ src/components/machine/mod.rs               | 2 +-
+ src/components/power/klipper.rs             | 2 +-
+ src/components/update_manager/app_deploy.rs | 2 +-
+ src/components/update_manager/mod.rs        | 2 +-
+ src/confighelper/source.rs                  | 2 +-
+ src/loghelper.rs                            | 2 +-
+ src/server.rs                               | 4 ++--
+ 15 files changed, 20 insertions(+), 20 deletions(-)
+
+diff --git a/src/components/analysis.rs b/src/components/analysis.rs
+index 72fed3e..930f211 100644
+--- a/src/components/analysis.rs
++++ b/src/components/analysis.rs
+@@ -501,7 +501,7 @@ impl Component for GcodeAnalysis {
+                 }
+             }
+             if !Self::check_estimator_perms(&path) {
+-                server().add_warning("[analysis]: Moonraker lacks permission to execute Klipper Estimator", None, true);
++                server().add_warning("[analysis]: Moonruster lacks permission to execute Klipper Estimator", None, true);
+             } else {
+                 self.detect_estimator_version().await?;
+             }
+diff --git a/src/components/application/handlers.rs b/src/components/application/handlers.rs
+index 57d61a3..6f894ec 100644
+--- a/src/components/application/handlers.rs
++++ b/src/components/application/handlers.rs
+@@ -442,9 +442,9 @@ impl MoonrakerApp {
+             Some(a) => {
+                 let authorized = a.authenticate_request(req, true).await.is_ok();
+                 if authorized {
+-                    summary.push("Your device is authorized to access Moonraker's API.".into());
++                    summary.push("Your device is authorized to access Moonruster's API.".into());
+                 } else {
+-                    summary.push("Your device is not authorized to access Moonraker's API. This is normal if you intend to use API Key authentication or log in as an authenticated user.  Otherwise you need to add your IP address to the 'trusted_clients' option in the [authorization] section of moonraker.conf.".into());
++                    summary.push("Your device is not authorized to access Moonruster's API. This is normal if you intend to use API Key authentication or log in as an authenticated user.  Otherwise you need to add your IP address to the 'trusted_clients' option in the [authorization] section of moonraker.conf.".into());
+                 }
+                 let ce = a.cors_enabled();
+                 if ce {
+@@ -465,7 +465,7 @@ impl MoonrakerApp {
+         if kstate != KlippyState::DISCONNECTED {
+             summary.push(format!("Klipper reports {}", kconn.state_message_for(kstate).to_lowercase()));
+         } else {
+-            summary.push("Moonraker is not currently connected to Klipper.  Make sure that the klipper service has successfully started and that its unix is enabled.".into());
++            summary.push("Moonruster is not currently connected to Klipper.  Make sure that the klipper service has successfully started and that its unix is enabled.".into());
+         }
+         let announcements = match srv.get::<crate::components::announcements::Announcements>() {
+             Some(a) => a.get_announcements(false).await,
+diff --git a/src/components/application/mod.rs b/src/components/application/mod.rs
+index 29ef7d6..2c42350 100644
+--- a/src/components/application/mod.rs
++++ b/src/components/application/mod.rs
+@@ -314,7 +314,7 @@ impl MoonrakerApp {
+         let host = if host.to_lowercase() == "all" { "" } else { host };
+         if let Err(e) = self.create_http_server(port, host, None).await {
+             server().add_warning(
+-                &format!("Failed to start HTTP server: {}.  See moonraker.log for more details.", e),
++                &format!("Failed to start HTTP server: {}.  See moonruster.log for more details.", e),
+                 None,
+                 true,
+             );
+@@ -336,7 +336,7 @@ impl MoonrakerApp {
+                 Ok(acceptor) => {
+                     if let Err(e) = self.create_http_server(ssl_port, host, Some(acceptor)).await {
+                         server().add_warning(
+-                            &format!("Failed to start HTTPS server: {}.  See moonraker.log for more details.", e),
++                            &format!("Failed to start HTTPS server: {}.  See moonruster.log for more details.", e),
+                             None,
+                             true,
+                         );
+@@ -344,7 +344,7 @@ impl MoonrakerApp {
+                 }
+                 Err(e) => {
+                     server().add_warning(
+-                        &format!("Failed to start HTTPS server: {}.  See moonraker.log for more details.", e),
++                        &format!("Failed to start HTTPS server: {}.  See moonruster.log for more details.", e),
+                         None,
+                         true,
+                     );
+diff --git a/src/components/authorization/mod.rs b/src/components/authorization/mod.rs
+index 0595e8a..e47cb57 100644
+--- a/src/components/authorization/mod.rs
++++ b/src/components/authorization/mod.rs
+@@ -589,7 +589,7 @@ impl Authorization {
+                 .ok_or_else(|| ServerError::bad(format!("Unregistered User: {}", username)))?;
+             if user_info.source != source {
+                 return Err(ServerError::new(
+-                    format!("Moonraker cannot authenticate user '{}', must specify source '{}'", username, user_info.source),
++                    format!("Moonruster cannot authenticate user '{}', must specify source '{}'", username, user_info.source),
+                     401,
+                 ));
+             }
+diff --git a/src/components/dbus_manager.rs b/src/components/dbus_manager.rs
+index 0fb90b1..ad1ef74 100644
+--- a/src/components/dbus_manager.rs
++++ b/src/components/dbus_manager.rs
+@@ -181,7 +181,7 @@ impl DbusManager {
+             Ok((authorized, _, _)) => {
+                 if !authorized {
+                     self.check_warned();
+-                    srv.add_warning(&format!("Moonraker not authorized for PolicyKit action: [{}], {}", action, err_msg), None, true);
++                    srv.add_warning(&format!("Moonruster not authorized for PolicyKit action: [{}], {}", action, err_msg), None, true);
+                 }
+                 authorized
+             }
+diff --git a/src/components/file_manager/mod.rs b/src/components/file_manager/mod.rs
+index c4b22af..3d4a1aa 100644
+--- a/src/components/file_manager/mod.rs
++++ b/src/components/file_manager/mod.rs
+@@ -316,7 +316,7 @@ impl FileManager {
+             server().add_log_rollover_item(
+                 &format!("fm_reg_perms_{}", root),
+                 &format!(
+-                    "file_manager: Moonraker has detected the following missing permissions for root folder '{}': {}",
++                    "file_manager: Moonruster has detected the following missing permissions for root folder '{}': {}",
+                     root,
+                     missing.join(" | ")
+                 ),
+diff --git a/src/components/file_manager/observer/mod.rs b/src/components/file_manager/observer/mod.rs
+index 20f9018..b3bec62 100644
+--- a/src/components/file_manager/observer/mod.rs
++++ b/src/components/file_manager/observer/mod.rs
+@@ -190,7 +190,7 @@ impl Observer {
+             Ok(n) => n,
+             Err(_) => {
+                 server().add_warning(
+-                    &format!("file_manager: Failed to create inotify root node {}. See moonraker.log for details.", root),
++                    &format!("file_manager: Failed to create inotify root node {}. See moonruster.log for details.", root),
+                     None,
+                     true,
+                 );
+diff --git a/src/components/klippy_connection.rs b/src/components/klippy_connection.rs
+index 9f909ce..281dc27 100644
+--- a/src/components/klippy_connection.rs
++++ b/src/components/klippy_connection.rs
+@@ -728,7 +728,7 @@ impl KlippyConnection {
+         if !missing.is_empty() {
+             let err_str: Vec<String> = missing.iter().map(|o| format!("[{}]", o)).collect();
+             log::info!(
+-                "\nWarning, unable to detect the following printer objects:\n{}\nPlease add the the above sections to printer.cfg for full Moonraker functionality.",
++                "\nWarning, unable to detect the following printer objects:\n{}\nPlease add the the above sections to printer.cfg for full Moonruster functionality.",
+                 err_str.join(", ")
+             );
+         }
+diff --git a/src/components/machine/mod.rs b/src/components/machine/mod.rs
+index 09ea8ee..9a5e23b 100644
+--- a/src/components/machine/mod.rs
++++ b/src/components/machine/mod.rs
+@@ -445,7 +445,7 @@ impl Machine {
+             }
+             if restart {
+                 self.restart_moonraker_service();
+-                responses.push("Moonraker is currently in the process of restarting.".into());
++                responses.push("Moonruster is currently in the process of restarting.".into());
+             }
+         }
+         Ok(json!({"sudo_responses": responses, "is_restarting": restart}))
+diff --git a/src/components/power/klipper.rs b/src/components/power/klipper.rs
+index 64e5a0b..8534cdc 100644
+--- a/src/components/power/klipper.rs
++++ b/src/components/power/klipper.rs
+@@ -11,7 +11,7 @@ impl PowerDevice {
+         if !unit.is_empty() && self.bound_services.borrow().contains(&unit) {
+             server().add_warning(
+                 &format!(
+-                    "Power: Klipper Device {} contains invalid bound service {}.  Remove this service from the configuration and restart Moonraker.",
++                    "Power: Klipper Device {} contains invalid bound service {}.  Remove this service from the configuration and restart Moonruster.",
+                     self.name, unit
+                 ),
+                 Some(&format!("kpd_{}", self.name)),
+diff --git a/src/components/update_manager/app_deploy.rs b/src/components/update_manager/app_deploy.rs
+index 7dec1f5..0f2917e 100644
+--- a/src/components/update_manager/app_deploy.rs
++++ b/src/components/update_manager/app_deploy.rs
+@@ -195,7 +195,7 @@ impl AppDeploy {
+             if !machine.map(|m| m.is_service_allowed(self.name())).unwrap_or(false) {
+                 srv.add_warning(
+                     &format!(
+-                        "[{}]: Moonraker is not permitted to restart service '{}'.  To enable management of this service add {} to the bottom of the file {}.  To disable management for this service set 'is_system_service: False' in the configuration for this section.",
++                        "[{}]: Moonruster is not permitted to restart service '{}'.  To enable management of this service add {} to the bottom of the file {}.  To disable management for this service set 'is_system_service: False' in the configuration for this section.",
+                         config.get_name(),
+                         self.name(),
+                         self.name(),
+diff --git a/src/components/update_manager/mod.rs b/src/components/update_manager/mod.rs
+index 73b64a3..8cd5ace 100644
+--- a/src/components/update_manager/mod.rs
++++ b/src/components/update_manager/mod.rs
+@@ -445,7 +445,7 @@ impl InstanceTracker {
+                 if iids.len() > 1 {
+                     server().add_log_rollover_item(
+                         "um_multi_instance_msg",
+-                        &format!("Multiple instances of Moonraker have the update manager enabled.\n{}", s),
++                        &format!("Multiple instances of Moonruster have the update manager enabled.\n{}", s),
+                         true,
+                     );
+                 }
+diff --git a/src/confighelper/source.rs b/src/confighelper/source.rs
+index 2491338..4d89fb7 100644
+--- a/src/confighelper/source.rs
++++ b/src/confighelper/source.rs
+@@ -423,7 +423,7 @@ impl ConfigSource {
+             }
+             if !utils::access_read(file_path) {
+                 return ConfigError(format!(
+-                    "Moonraker does not have Read/Write permission for config file at path '{}'",
++                    "Moonruster does not have Read/Write permission for config file at path '{}'",
+                     file_path.display()
+                 ));
+             }
+diff --git a/src/loghelper.rs b/src/loghelper.rs
+index 38e5ecd..40bbe29 100644
+--- a/src/loghelper.rs
++++ b/src/loghelper.rs
+@@ -320,7 +320,7 @@ pub fn init(app_args: &Map<String, Value>) -> Option<String> {
+                 let norm = crate::utils::normpath(&crate::utils::absolute(&path));
+                 let dir = norm.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                 warning = Some(format!(
+-                    "Unable to create log file at '{}'. Make sure that the folder '{}' exists and Moonraker has Read/Write access to the folder. ",
++                    "Unable to create log file at '{}'. Make sure that the folder '{}' exists and Moonruster has Read/Write access to the folder. ",
+                     log_file, dir
+                 ));
+             }
+diff --git a/src/server.rs b/src/server.rs
+index 4064828..009411c 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -406,7 +406,7 @@ impl Server {
+         let is_backup = args.get("is_backup_config").and_then(|v| v.as_bool()).unwrap_or(false);
+         let config = crate::confighelper::get_configuration(&cfg_file, backup.as_deref(), is_backup)?;
+         let cfg_files = config.get_config_files().join("\n");
+-        let mut cfg_item = format!("\n{} Moonraker Configuration {}\n\n", "#".repeat(20), "#".repeat(20));
++        let mut cfg_item = format!("\n{} Moonruster Configuration {}\n\n", "#".repeat(20), "#".repeat(20));
+         cfg_item.push_str(&config.write_config());
+         cfg_item.push_str(&"#".repeat(65));
+         cfg_item.push_str(&format!("\nAll Configuration Files:\n{}\n", cfg_files));
+@@ -466,7 +466,7 @@ impl Server {
+             ext.start_unix_server().await;
+         }
+         log::info!(
+-            "Starting Moonraker on ({}, {}), Hostname: {}",
++            "Starting Moonruster on ({}, {}), Hostname: {}",
+             self.host.borrow(),
+             self.port.get(),
+             crate::utils::hostname()

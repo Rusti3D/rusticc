@@ -3,4 +3,5 @@ SRC_URI += " \
     file://moonruster/0001-rusticc-COSMOS-s-Moonraker-patches-from-Moonruster-s.patch \
     file://moonruster/0002-rusticc-COSMOS-s-Moonraker-patches-always-on.patch \
     file://moonruster/0003-rusticc-Moonruster-s-update-entry-as-COSMOS-s-Moonra.patch \
+    file://moonruster/0004-rusticc-the-logs-name-the-server-Moonruster.patch \
 "
