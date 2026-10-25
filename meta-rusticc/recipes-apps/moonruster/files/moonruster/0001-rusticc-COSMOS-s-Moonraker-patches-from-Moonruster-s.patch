@@ -15,11 +15,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  src/components/machine.rs                   | 160 ++++++-
  src/components/update_manager/common.rs     |  11 +-
  src/components/update_manager/mod.rs        |   2 +
- src/components/update_manager/swu_deploy.rs | 461 ++++++++++++++++++++
+ src/components/update_manager/swu_deploy.rs | 462 ++++++++++++++++++++
  src/components/webcam.rs                    |  39 +-
  src/loghelper.rs                            |  40 +-
  src/utils.rs                                |  42 ++
- 8 files changed, 849 insertions(+), 17 deletions(-)
+ 8 files changed, 850 insertions(+), 17 deletions(-)
  create mode 100644 src/components/update_manager/swu_deploy.rs
 
 diff --git a/src/components/application.rs b/src/components/application.rs
@@ -227,7 +227,7 @@ index b5f07f3..102b6be 100644
          if let Some(ims) = req.header("If-Modified-Since") {
              if let Ok(since) = httpdate::parse_http_date(&ims) {
 diff --git a/src/components/machine.rs b/src/components/machine.rs
-index 6855537..ff765af 100644
+index 9aaed07..8581a39 100644
 --- a/src/components/machine.rs
 +++ b/src/components/machine.rs
 @@ -30,6 +30,13 @@ const SYSTEMD_MGR: &str = "org.freedesktop.systemd1.Manager";
@@ -244,7 +244,7 @@ index 6855537..ff765af 100644
  
  pub type SudoCallback = Rc<dyn Fn() -> LocalBoxFuture<'static, Result<(String, bool), ServerError>>>;
  
-@@ -166,6 +173,7 @@ pub enum ProviderKind {
+@@ -168,6 +175,7 @@ pub enum ProviderKind {
      SystemdCli,
      SystemdDbus,
      SupervisordCli,
@@ -252,7 +252,7 @@ index 6855537..ff765af 100644
  }
  
  pub struct Provider {
-@@ -173,6 +181,8 @@ pub struct Provider {
+@@ -175,6 +183,8 @@ pub struct Provider {
      shutdown_action: String,
      available_services: RefCell<IndexMap<String, Value>>,
      svc_cmd: RefCell<Option<Rc<ShellCommand>>>,
@@ -261,14 +261,14 @@ index 6855537..ff765af 100644
      spv_conf: String,
      dbus_ready: Cell<bool>,
      login_mgr: Cell<bool>,
-@@ -225,9 +235,60 @@ impl Provider {
+@@ -229,10 +239,61 @@ impl Provider {
                  self.update_service_status(0, true).await;
                  self.register_status_cb();
              }
 +            ProviderKind::Sysvinit => {
 +                let machine: Rc<Machine> = match server().lookup_component("machine") {
 +                    Some(m) => m,
-+                    None => return,
++                    None => return Ok(()),
 +                };
 +                // COSMOS's zram script replaces /sbin/init with a shell shim,
 +                // which trips container detection
@@ -279,7 +279,7 @@ index 6855537..ff765af 100644
 +                        self.available_services
 +                            .borrow_mut()
 +                            .insert(svc.clone(), json!({"active_state": "unknown", "sub_state": "unknown"}));
-+                        let cmd = self.shell().build_shell_command(&format!("{}/{} status", SYSV_INIT_PATH, svc), None, None, None, false, None);
++                        let cmd = self.shell().build_shell_command(&format!("{}/{} status", SYSV_INIT_PATH, svc), None, None, None, false, None)?;
 +                        self.status_cmds.borrow_mut().insert(svc.clone(), cmd);
 +                        if let Some(pidfile) = std::fs::read_to_string(&script).ok().and_then(|t| sysv_status_pidfile(&t)) {
 +                            self.status_pidfiles.borrow_mut().insert(svc.clone(), pidfile);
@@ -292,6 +292,7 @@ index 6855537..ff765af 100644
 +                }
 +            }
          }
+         Ok(())
      }
  
 +    async fn update_sysv_state(&self, svc: &str, notify: bool) {
@@ -322,7 +323,7 @@ index 6855537..ff765af 100644
      fn register_status_cb(self: &Rc<Self>) {
          if let Some(ps) = server().lookup_component::<crate::components::proc_stats::ProcStats>("proc_stats") {
              let p = Rc::downgrade(self);
-@@ -473,6 +534,15 @@ impl Provider {
+@@ -478,6 +539,15 @@ impl Provider {
      }
  
      async fn update_service_status(&self, sequence: u64, notify: bool) {
@@ -338,7 +339,7 @@ index 6855537..ff765af 100644
          if sequence % 2 != 0 {
              return;
          }
-@@ -529,6 +599,9 @@ impl Provider {
+@@ -534,6 +604,9 @@ impl Provider {
      }
  
      pub async fn shutdown(&self) -> Result<(), ServerError> {
@@ -348,7 +349,7 @@ index 6855537..ff765af 100644
          if self.kind == ProviderKind::SystemdDbus && self.login_mgr.get() {
              let method = if self.shutdown_action == "poweroff" { "PowerOff" } else { "Halt" };
              let dbus = self.dbus().ok_or_else(|| ServerError::new("DBus Not Connected, ", 503))?;
-@@ -548,6 +621,9 @@ impl Provider {
+@@ -553,6 +626,9 @@ impl Provider {
      }
  
      pub async fn reboot(&self) -> Result<(), ServerError> {
@@ -358,7 +359,7 @@ index 6855537..ff765af 100644
          if self.kind == ProviderKind::SystemdDbus && self.login_mgr.get() {
              let dbus = self.dbus().ok_or_else(|| ServerError::new("DBus Not Connected, ", 503))?;
              let _: () = dbus.call(LOGIN_BUS, LOGIN_PATH, LOGIN_MGR, "Reboot", &(false,)).await?;
-@@ -566,6 +642,33 @@ impl Provider {
+@@ -571,6 +647,33 @@ impl Provider {
              ProviderKind::None => Err(ServerError::new("Service Actions Not Available", 503)),
              ProviderKind::SystemdCli => self.exec_sudo(&format!("systemctl {} {}", action, service_name)).await.map(|_| ()),
              ProviderKind::SupervisordCli => self.exec_supervisorctl(&format!("{} {}", action, service_name), 1, 6.0, None).await.map(|_| ()),
@@ -392,7 +393,7 @@ index 6855537..ff765af 100644
              ProviderKind::SystemdDbus => {
                  let dbus = match self.dbus() {
                      Some(d) if d.is_connected() && self.dbus_ready.get() => d,
-@@ -589,7 +692,9 @@ impl Provider {
+@@ -594,7 +697,9 @@ impl Provider {
  
      pub async fn check_virt_status(&self) -> Value {
          match self.kind {
@@ -403,7 +404,7 @@ index 6855537..ff765af 100644
              ProviderKind::SystemdCli => {
                  let mut virt_id = "none".to_string();
                  let mut virt_type = "none".to_string();
-@@ -722,6 +827,23 @@ impl Provider {
+@@ -727,6 +832,23 @@ impl Provider {
                  }
              }
              ProviderKind::SupervisordCli => self.extract_spv_info(service_name, pid).await,
@@ -427,7 +428,7 @@ index 6855537..ff765af 100644
          }
      }
  
-@@ -921,6 +1043,8 @@ impl Machine {
+@@ -926,6 +1048,8 @@ impl Machine {
              "systemd_cli" => ProviderKind::SystemdCli,
              "systemd_dbus" => ProviderKind::SystemdDbus,
              "supervisord_cli" => ProviderKind::SupervisordCli,
@@ -436,7 +437,7 @@ index 6855537..ff765af 100644
              other => return Err(ConfigHelper::error(format!("Invalid Provider: {}", other))),
          };
          let shutdown_action = config.getchoice("shutdown_action", &["halt", "poweroff"], Some("poweroff"), true)?;
-@@ -931,6 +1055,8 @@ impl Machine {
+@@ -936,6 +1060,8 @@ impl Machine {
              shutdown_action,
              available_services: RefCell::new(IndexMap::new()),
              svc_cmd: RefCell::new(None),
@@ -445,7 +446,7 @@ index 6855537..ff765af 100644
              spv_conf,
              dbus_ready: Cell::new(false),
              login_mgr: Cell::new(false),
-@@ -1107,8 +1233,6 @@ impl Machine {
+@@ -1112,8 +1238,6 @@ impl Machine {
          self.provider.extract_service_info(name, pid, None, false).await
      }
  
@@ -454,7 +455,7 @@ index 6855537..ff765af 100644
      pub fn get_system_provider(&self) -> Rc<Provider> {
          self.provider.clone()
      }
-@@ -1666,6 +1790,20 @@ impl Machine {
+@@ -1671,6 +1795,20 @@ impl Machine {
      }
  }
  
@@ -475,7 +476,7 @@ index 6855537..ff765af 100644
  /// The interfaces `ip -json -det address` reports: up, ethernet type, with
  /// addresses (getifaddrs order, as ip's).  None when a CAN interface is up.
  fn native_network() -> Option<Map<String, Value>> {
-@@ -2443,3 +2581,19 @@ fn check_path_bare(path: &Path) -> bool {
+@@ -2448,3 +2586,19 @@ fn check_path_bare(path: &Path) -> bool {
  pub fn load_component(config: &ConfigHelper) -> Result<Rc<Machine>, crate::confighelper::ConfigError> {
      Machine::new(config)
  }
@@ -559,10 +560,10 @@ index f7deab9..eacf8b2 100644
  }
 diff --git a/src/components/update_manager/swu_deploy.rs b/src/components/update_manager/swu_deploy.rs
 new file mode 100644
-index 0000000..579950a
+index 0000000..5b24d1e
 --- /dev/null
 +++ b/src/components/update_manager/swu_deploy.rs
-@@ -0,0 +1,461 @@
+@@ -0,0 +1,462 @@
 +// SWUpdate Firmware Deployment (port of COSMOS's update_manager/swu_deploy.py,
 +// a patch to moonraker that updates COSMOS images from GitHub releases)
 +
@@ -656,7 +657,8 @@ index 0000000..579950a
 +            st.warnings.push("Unable to detect installed version from VERSION_ID in os-release".into());
 +            self.app.is_valid.set(false);
 +        }
-+        let cmd = crate::components::shell_command::shlex_split(&self.install_cmd);
++        // a command shlex cannot split is not found either
++        let cmd = crate::components::shell_command::shlex_split(&self.install_cmd).unwrap_or_default();
 +        if cmd.first().and_then(|c| crate::components::machine::which(c)).is_none() {
 +            st.warnings.push(format!("Install command '{}' not found", self.install_cmd));
 +            self.app.is_valid.set(false);
