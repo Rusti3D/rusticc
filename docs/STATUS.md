@@ -9,19 +9,16 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
   9/9 batch Canvas runs identical (`tools/canvas_cmp.sh`); drv8833 lane moves can't run in batch (no MCU replies).
 - [x] A native Rust AFC build for cosmoace_afc (AFC_ACE, the user's CC1 config): patch 0022 (`ace.rs`,
   `ace_transport.rs`); `tools/ace_cmp.sh` 4/4 identical against a fake ACE (docs/AFC_PORT.md stage 2).
-- [ ] Then the real Rusticc build, for the user to try on the printer (install only with their go).
-- [ ] Address any issues; then full AFC parity as its own project (rust afc).
-- [ ] Gaps in Rusticc / kaliru: camera support, "nothing should be breaking on my cc1".
-  - Camera: klipper side done (CAMERA_LIGHT_* shell commands, kaliru ce214e3); Moonruster's [webcam] and
-    `[server] webcam_redirect` asked of the Moonruster session (2026-10-25).
-  - Done: kaliru's plugin layer has setup_pin and the MCU pin / endstop classes (81d9fe3, 9981219); patch
-    0023 mirrors COSMOS's modules (drv8833): the python AFC with a Canvas runs on Rusticc, 9/9 identical.
-  - User (2026-10-25): other MMUs use the regular (python) AFC distro for now; the full native AFC port
-    comes once Rusticc checks out on the printer.
+- [x] The real Rusticc build on the printer: 0.0.1, then image 3904616fee (installed 2026-10-25, below).
+- [x] Full AFC parity as its own project: Rust-AFC (github.com/Rusti3D/Rust-AFC); its STATUS.md queues the rest
+  of AFC (stepper units, buffers, ..., OpenAMS). Until then other MMUs run as python AFC on kaliru.
+- [x] Gaps "nothing should be breaking on my cc1": camera (CAMERA_LIGHT_* kaliru ce214e3, Moonruster's webcam,
+  1280x720 at 15 fps), kaliru's plugin layer pins / endstops (81d9fe3, 9981219), COSMOS module mirrors (drv8833).
 - [x] Release 0.0.1 (2026-10-25): github.com/Rusti3D/rusticc/releases/tag/0.0.1, installed on the user's CC1
   (slot B; slot A kept as stock COSMOS 20b31d0226). Image: rusticc e04cb3e8, Moonruster 02ae9c27.
-- [ ] 0.0.2 built locally, NOT released (user: "It can go in the next iteration"): Moonruster's logs name it
-  (rusticc 9d83ae1, Moonruster patch 0004; Moonruster e0589681), image d12147cc. Release with the next batch.
+- [ ] Release 0.0.2 (user: "It can go in the next iteration"): not released yet. Its content is what the CC1
+  runs now (image 3904616fee: Rust-AFC, Moonruster log naming, timelapse capture, camera 720p, trim, no
+  Moonraker); publish when the user says so, after the hardware check of the ACE runout flow.
 - [x] AFC as Rust-AFC (2026-10-25): the native AFC (Canvas, ACE Pro / ACE 2) moved out of patches 0021/0022
   into the Rust-AFC crate (github.com/Rusti3D/Rust-AFC 3ea26b1), built in by the rusticc crate (patch 0023,
   `rusticc/`, kaliru d0f37ad's native plugin API); the binary is /usr/bin/rusticc from `tools/build_cc1.sh`.
