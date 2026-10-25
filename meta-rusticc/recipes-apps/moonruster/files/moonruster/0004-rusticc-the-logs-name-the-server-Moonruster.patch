@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 18:58:48 +0200
-Subject: [PATCH 4/4] rusticc: the logs name the server Moonruster
+Subject: [PATCH 4/5] rusticc: the logs name the server Moonruster
 
 Human-readable log, warning and message texts that name the running
 server say Moonruster, and 'See moonraker.log' points at moonruster.log

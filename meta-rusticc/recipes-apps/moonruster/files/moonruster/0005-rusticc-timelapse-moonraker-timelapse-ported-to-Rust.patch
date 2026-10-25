@@ -1,0 +1,943 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sun, 25 Oct 2026 21:11:39 +0200
+Subject: [PATCH 5/5] rusticc: timelapse, moonraker-timelapse ported to Rust
+
+A built-in timelapse component with moonraker-timelapse c7fff11's API and
+behaviour (component/timelapse.py): the /machine/timelapse/* endpoints,
+the timelapse_newframe/_saveFrames/_render remote methods its Klipper
+macros call, the timelapse:timelapse_event notification, the settings in
+the 'timelapse' database namespace with moonraker.conf overrides
+(blockedsettings), frames by wget from the webcam's snapshot URL, render
+by ffmpeg/libx264. Built in, so Mainsail's timelapse tab works without
+loading Python (the Python component costs ~9 MB on the CC1). A built-in
+name wins over a timelapse.py in the Moonraker tree.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017xQsBSvb6emYLfnWCbF3jA
+---
+ src/components/mod.rs       |   5 +-
+ src/components/timelapse.rs | 877 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 881 insertions(+), 1 deletion(-)
+ create mode 100644 src/components/timelapse.rs
+
+diff --git a/src/components/mod.rs b/src/components/mod.rs
+index 927a346..60be098 100644
+--- a/src/components/mod.rs
++++ b/src/components/mod.rs
+@@ -33,6 +33,7 @@ pub mod simplyprint;
+ pub mod spoolman;
+ pub mod td1;
+ pub mod template;
++pub mod timelapse;
+ pub mod update_manager;
+ pub mod webcam;
+ pub mod wled;
+@@ -88,6 +89,7 @@ named! {
+     "spoolman" => spoolman::SpoolManager,
+     "td1" => td1::Td1,
+     "template" => template::TemplateFactory,
++    "timelapse" => timelapse::Timelapse,
+     "update_manager" => update_manager::UpdateManager,
+     "webcam" => webcam::WebcamManager,
+     "websockets" => websockets::WebsocketManager,
+@@ -102,7 +104,7 @@ fn wrap<T: crate::server::Component + 'static>(c: Rc<T>) -> Loaded {
+ }
+ 
+ /// Names of the available components (the modules in moonraker.components)
+-pub const COMPONENT_NAMES: [&str; 37] = ["application", "websockets", "klippy_connection", "klippy_apis", "database", "template", "secrets", "authorization", "file_manager", "machine", "data_store", "shell_command", "proc_stats", "job_state", "job_queue", "history", "http_client", "announcements", "webcam", "extensions", "dbus_manager", "ldap", "octoprint_compat", "mqtt", "sensor", "spoolman", "update_manager", "gpio", "button", "power", "notifier", "zeroconf", "wled", "paneldue", "analysis", "td1", "simplyprint"];
++pub const COMPONENT_NAMES: [&str; 38] = ["application", "websockets", "klippy_connection", "klippy_apis", "database", "template", "secrets", "authorization", "file_manager", "machine", "data_store", "shell_command", "proc_stats", "job_state", "job_queue", "history", "http_client", "announcements", "webcam", "extensions", "dbus_manager", "ldap", "octoprint_compat", "mqtt", "sensor", "spoolman", "update_manager", "gpio", "button", "power", "notifier", "zeroconf", "wled", "paneldue", "analysis", "td1", "simplyprint", "timelapse"];
+ 
+ /// Returns Ok(None) when no component with the given name exists
+ pub fn load_component(_server: &Rc<Server>, config: &ConfigHelper, name: &str) -> Result<Option<Loaded>, ConfigError> {
+@@ -148,6 +150,7 @@ pub fn load_component(_server: &Rc<Server>, config: &ConfigHelper, name: &str) -
+         "analysis" => wrap(analysis::load_component(config)?),
+         "td1" => wrap(td1::load_component(config)?),
+         "simplyprint" => wrap(simplyprint::load_component(config)?),
++        "timelapse" => wrap(timelapse::load_component(config)?),
+         _ => return Ok(None),
+     };
+     Ok(Some(loaded))
+diff --git a/src/components/timelapse.rs b/src/components/timelapse.rs
+new file mode 100644
+index 0000000..039e940
+--- /dev/null
++++ b/src/components/timelapse.rs
+@@ -0,0 +1,877 @@
++// Moonraker Timelapse (port of mainsail-crew/moonraker-timelapse c7fff11,
++// component/timelapse.py): frames from the webcam snapshot URL at each
++// TIMELAPSE_TAKE_FRAME (or the hyperlapse cycle), rendered with ffmpeg
++
++use crate::common::*;
++use crate::components::file_manager::FileManager;
++use crate::components::shell_command::{OutputCallback, RunOpts, ShellCommandFactory};
++use crate::confighelper::{Bounds, ConfigError, ConfigHelper};
++use crate::pyfmt::{py_str, py_truthy};
++use crate::server::{server, spawn, Component};
++use async_trait::async_trait;
++use serde_json::{json, Map, Value};
++use std::cell::{Cell, RefCell};
++use std::path::Path;
++use std::rc::Rc;
++use std::time::Duration;
++
++const SETTINGS_WITH_GCODECHANGE: [&str; 13] = [
++    "enabled",
++    "parkhead",
++    "parkpos",
++    "park_custom_pos_x",
++    "park_custom_pos_y",
++    "park_custom_pos_dz",
++    "park_travel_speed",
++    "park_retract_speed",
++    "park_extrude_speed",
++    "park_retract_distance",
++    "park_extrude_distance",
++    "park_time",
++    "fw_retract",
++];
++
++fn default_config() -> Map<String, Value> {
++    let v = json!({
++        "enabled": true,
++        "mode": "layermacro",
++        "camera": "",
++        "snapshoturl": "http://localhost:8080/?action=snapshot",
++        "stream_delay_compensation": 0.05,
++        "gcode_verbose": false,
++        "parkhead": false,
++        "parkpos": "back_left",
++        "park_custom_pos_x": 10.0,
++        "park_custom_pos_y": 10.0,
++        "park_custom_pos_dz": 0.0,
++        "park_travel_speed": 100,
++        "park_retract_speed": 15,
++        "park_extrude_speed": 15,
++        "park_retract_distance": 1.0,
++        "park_extrude_distance": 1.0,
++        "park_time": 0.1,
++        "fw_retract": false,
++        "hyperlapse_cycle": 30,
++        "autorender": true,
++        "constant_rate_factor": 23,
++        "output_framerate": 30,
++        "pixelformat": "yuv420p",
++        "time_format_code": "%Y%m%d_%H%M",
++        "extraoutputparams": "",
++        "variable_fps": false,
++        "targetlength": 10,
++        "variable_fps_min": 5,
++        "variable_fps_max": 60,
++        "rotation": 0,
++        "flip_x": false,
++        "flip_y": false,
++        "duplicatelastframe": 5,
++        "previewimage": true,
++        "saveframes": false
++    });
++    match v {
++        Value::Object(m) => m,
++        _ => unreachable!(),
++    }
++}
++
++/// The python type of a setting, which decides how a new value is parsed
++#[derive(Clone, Copy, PartialEq)]
++enum Kind {
++    Str,
++    Bool,
++    Int,
++    Float,
++}
++
++fn kind_of(v: &Value) -> Option<Kind> {
++    match v {
++        Value::String(_) => Some(Kind::Str),
++        Value::Bool(_) => Some(Kind::Bool),
++        Value::Number(n) if n.is_f64() => Some(Kind::Float),
++        Value::Number(_) => Some(Kind::Int),
++        _ => None,
++    }
++}
++
++/// os.path.join(p, ''): a trailing "/"
++fn with_slash(p: &str) -> String {
++    if p.ends_with('/') { p.to_string() } else { format!("{}/", p) }
++}
++
++/// glob(dir + "frame*.jpg"), sorted
++fn frame_files(dir: &str) -> Vec<String> {
++    let mut files: Vec<String> = glob::glob(&format!("{}frame*.jpg", glob::Pattern::escape(dir)))
++        .map(|g| g.filter_map(|p| p.ok()).map(|p| p.to_string_lossy().to_string()).collect())
++        .unwrap_or_default();
++    files.sort();
++    files
++}
++
++fn file_name(p: &str) -> String {
++    p.rsplit('/').next().unwrap_or(p).to_string()
++}
++
++/// The frame number in an ffmpeg progress line: python's
++/// r'(?<=frame=)*(\d+)(?=.+fps)', whose repeated lookbehind matches nothing
++fn progress_frame(line: &str) -> Option<f64> {
++    static RE: std::sync::LazyLock<fancy_regex::Regex> =
++        std::sync::LazyLock::new(|| fancy_regex::Regex::new(r"(\d+)(?=.+fps)").unwrap());
++    RE.find(line).ok().flatten().and_then(|m| m.as_str().parse().ok())
++}
++
++/// shutil.move: a rename, or a copy and delete across filesystems
++fn move_file(src: &str, dst: &str) -> std::io::Result<()> {
++    if std::fs::rename(src, dst).is_ok() {
++        return Ok(());
++    }
++    std::fs::copy(src, dst)?;
++    std::fs::remove_file(src)
++}
++
++pub struct Timelapse {
++    confighelper: ConfigHelper,
++    config: RefCell<Map<String, Value>>,
++    out_dir: String,
++    temp_dir: String,
++    ffmpeg_binary_path: String,
++    ffmpeg_installed: bool,
++    wget_skip_cert: bool,
++    renderisrunning: Cell<bool>,
++    saveisrunning: Cell<bool>,
++    takingframe: Cell<bool>,
++    framecount: Cell<i64>,
++    lastframefile: RefCell<String>,
++    lastrenderprogress: Cell<i64>,
++    lastcmdreponse: RefCell<String>,
++    byrendermacro: Cell<bool>,
++    hyperlapserunning: Cell<bool>,
++    printing: Cell<bool>,
++}
++
++impl Timelapse {
++    pub fn new(confighelper: &ConfigHelper) -> Result<Rc<Self>, ConfigError> {
++        let srv = server();
++        let out_dir_cfg = confighelper.get_or("output_path", "~/timelapse/")?;
++        let temp_dir_cfg = confighelper.get_or("frame_path", "/tmp/timelapse/")?;
++        let ffmpeg_binary_path = confighelper.get_or("ffmpeg_binary_path", "/usr/bin/ffmpeg")?;
++        let wget_skip_cert = confighelper.getboolean_or("wget_skip_cert_check", false)?;
++
++        // Get Config from Database and overwrite defaults
++        let mut config = default_config();
++        let dbconfig = srv
++            .database()
++            .get_item_sync("timelapse", Some(&json!("config")), Some(Value::Object(config.clone())))
++            .unwrap_or(Value::Null);
++        if let Value::Object(db) = dbconfig {
++            config.extend(db);
++        }
++        // Overwrite Config with fixed config made in moonraker.conf: a fallback
++        // to older setups and when the Frontend doesn't support the settings endpoint
++        let mut blockedsettings = Vec::new();
++        for option in confighelper.get_options().keys() {
++            let Some(cur) = config.get(option) else { continue };
++            let value = match kind_of(cur) {
++                Some(Kind::Str) => Some(json!(confighelper.get(option)?)),
++                Some(Kind::Bool) => confighelper.getboolean_opt(option)?.map(|b| json!(b)),
++                Some(Kind::Int) => Some(json!(confighelper.getint(option)?)),
++                Some(Kind::Float) => Some(json!(confighelper.getfloat_b(option, None, Bounds::none())?)),
++                None => None,
++            };
++            if let Some(v) = value {
++                config.insert(option.clone(), v);
++            }
++            blockedsettings.push(json!(option));
++        }
++        config.insert("blockedsettings".into(), Value::Array(blockedsettings));
++        log::debug!("blockedsettings {}", py_str(&config["blockedsettings"]));
++
++        // check if ffmpeg is installed
++        let ffmpeg_installed = Path::new(&ffmpeg_binary_path).is_file();
++        if !ffmpeg_installed {
++            config.insert("autorender".into(), json!(false));
++            log::info!("timelapse: {} not found please install to use render functionality", ffmpeg_binary_path);
++        }
++
++        // setup directories
++        let out_dir = with_slash(&crate::utils::expand_user(&with_slash(&out_dir_cfg)).to_string_lossy());
++        let temp_dir = with_slash(&crate::utils::expand_user(&with_slash(&temp_dir_cfg)).to_string_lossy());
++        for d in [&temp_dir, &out_dir] {
++            std::fs::create_dir_all(d).map_err(|e| ConfigHelper::error(e.to_string()))?;
++        }
++
++        let tl = Rc::new(Timelapse {
++            confighelper: confighelper.clone(),
++            config: RefCell::new(config),
++            out_dir,
++            temp_dir,
++            ffmpeg_binary_path,
++            ffmpeg_installed,
++            wget_skip_cert,
++            renderisrunning: Cell::new(false),
++            saveisrunning: Cell::new(false),
++            takingframe: Cell::new(false),
++            framecount: Cell::new(0),
++            lastframefile: RefCell::new(String::new()),
++            lastrenderprogress: Cell::new(0),
++            lastcmdreponse: RefCell::new(String::new()),
++            byrendermacro: Cell::new(false),
++            hyperlapserunning: Cell::new(false),
++            printing: Cell::new(false),
++        });
++
++        // setup eventhandlers and endpoints
++        let fm = srv.get::<FileManager>().ok_or_else(|| ConfigHelper::error("file_manager"))?;
++        fm.register_directory("timelapse", Some(&tl.out_dir), true);
++        fm.register_directory("timelapse_frames", Some(&tl.temp_dir), false);
++        srv.register_notification("timelapse:timelapse_event", None);
++        let t = Rc::downgrade(&tl);
++        srv.on::<crate::events::GcodeResponse>(move |resp| {
++            if let Some(t) = t.upgrade() {
++                t.handle_gcode_response(resp.as_str().unwrap_or(""));
++            }
++        });
++        let t = Rc::downgrade(&tl);
++        srv.on::<crate::events::StatusUpdate>(move |status| {
++            if let Some(t) = t.upgrade() {
++                t.handle_status_update(status);
++            }
++        });
++        let t = Rc::downgrade(&tl);
++        srv.on::<crate::events::KlippyReady>(move |_| {
++            if let Some(t) = t.upgrade() {
++                let t2 = t.clone();
++                spawn(async move { t2.setgcodevariables().await });
++                spawn(async move { t.stop_hyperlapse().await });
++            }
++        });
++        let t = tl.clone();
++        srv.register_remote_method(
++            "timelapse_newframe",
++            crate::components::klippy_connection::remote_method(move |p| {
++                t.call_newframe(p.get("hyperlapse").map(py_truthy).unwrap_or(false))
++            }),
++        )
++        .map_err(|e| ConfigHelper::error(e.message))?;
++        let t = tl.clone();
++        srv.register_remote_method(
++            "timelapse_saveFrames",
++            crate::components::klippy_connection::remote_method(move |_| {
++                let t = t.clone();
++                spawn(async move {
++                    t.save_frames_zip().await;
++                });
++            }),
++        )
++        .map_err(|e| ConfigHelper::error(e.message))?;
++        let t = tl.clone();
++        srv.register_remote_method(
++            "timelapse_render",
++            crate::components::klippy_connection::remote_method(move |p| {
++                t.byrendermacro.set(p.get("byrendermacro").map(py_truthy).unwrap_or(false));
++                let t = t.clone();
++                spawn(async move {
++                    t.render().await;
++                });
++            }),
++        )
++        .map_err(|e| ConfigHelper::error(e.message))?;
++        let t = tl.clone();
++        let _ = srv.register_endpoint(
++            "/machine/timelapse/render",
++            RequestType::POST,
++            callback(move |_req| {
++                let t = t.clone();
++                async move { Ok(t.render().await) }
++            }),
++        );
++        let t = tl.clone();
++        let _ = srv.register_endpoint(
++            "/machine/timelapse/saveframes",
++            RequestType::POST,
++            callback(move |_req| {
++                let t = t.clone();
++                async move { Ok(t.save_frames_zip().await) }
++            }),
++        );
++        let t = tl.clone();
++        let _ = srv.register_endpoint(
++            "/machine/timelapse/settings",
++            RequestType::GET | RequestType::POST,
++            callback(move |req| {
++                let t = t.clone();
++                async move { t.webrequest_settings(req).await }
++            }),
++        );
++        let t = tl.clone();
++        let _ = srv.register_endpoint(
++            "/machine/timelapse/lastframeinfo",
++            RequestType::GET,
++            callback(move |_req| {
++                let t = t.clone();
++                async move { Ok(json!({"framecount": t.framecount.get(), "lastframefile": *t.lastframefile.borrow()})) }
++            }),
++        );
++        Ok(tl)
++    }
++
++    fn cfg(&self, key: &str) -> Value {
++        self.config.borrow().get(key).cloned().unwrap_or(Value::Null)
++    }
++    fn cfg_str(&self, key: &str) -> String {
++        py_str(&self.cfg(key))
++    }
++    fn cfg_bool(&self, key: &str) -> bool {
++        py_truthy(&self.cfg(key))
++    }
++    fn cfg_f64(&self, key: &str) -> f64 {
++        self.cfg(key).as_f64().unwrap_or(0.0)
++    }
++
++    fn shell() -> Rc<ShellCommandFactory> {
++        server().get::<ShellCommandFactory>().expect("shell_command")
++    }
++
++    /// Read the webcam config (the camera named in the settings, else the first)
++    fn get_webcam_config(&self) {
++        let webcam_name = self.cfg_str("camera");
++        let Some(wcmgr) = server().get::<crate::components::webcam::WebcamManager>() else {
++            log::info!("something went wronggetting Cam Camera:{} from Database. Exception: 'webcam'", webcam_name);
++            return;
++        };
++        let cams = wcmgr.get_webcams();
++        let camera = match (cams.get(&webcam_name), cams.values().next()) {
++            (Some(cam), _) if !webcam_name.is_empty() => cam.as_dict(),
++            (_, Some(cam)) => cam.as_dict(),
++            _ => {
++                log::info!("WARNING: no camera configured, using the fallback config");
++                json!({
++                    "snapshot_url": self.cfg("snapshoturl"),
++                    "rotation": self.cfg("rotation"),
++                    "flip_horizontal": self.cfg("flip_x"),
++                    "flip_vertical": self.cfg("flip_y"),
++                })
++            }
++        };
++        if let Err(e) = self.parse_webcam_config(&camera) {
++            log::info!("something went wronggetting Cam Camera:{} from Database. Exception: {}", webcam_name, e);
++        }
++    }
++
++    fn parse_webcam_config(&self, cam: &Value) -> Result<(), ConfigError> {
++        let old = (self.cfg_str("snapshoturl"), self.cfg("flip_x"), self.cfg("flip_y"), self.cfg("rotation"));
++        let ch = &self.confighelper;
++        let mut url = ch.get_or("snapshoturl", &py_str(&cam["snapshot_url"]))?;
++        let flip_x = ch.getboolean_or("flip_x", py_truthy(&cam["flip_horizontal"]))?;
++        let flip_y = ch.getboolean_or("flip_y", py_truthy(&cam["flip_vertical"]))?;
++        let rotation = ch.getint_or("rotation", cam["rotation"].as_i64().unwrap_or(0))?;
++        if !url.starts_with("http") {
++            url = if url.starts_with('/') { format!("http://localhost{}", url) } else { format!("http://localhost/{}", url) };
++        }
++        {
++            let mut c = self.config.borrow_mut();
++            c.insert("snapshoturl".into(), json!(url));
++            c.insert("flip_x".into(), json!(flip_x));
++            c.insert("flip_y".into(), json!(flip_y));
++            c.insert("rotation".into(), json!(rotation));
++        }
++        let new = (self.cfg_str("snapshoturl"), self.cfg("flip_x"), self.cfg("flip_y"), self.cfg("rotation"));
++        if old != new {
++            log::info!(
++                "snapshoturl: {}, Flip V/H: {}/{}, rotation: {}",
++                new.0,
++                py_str(&new.2),
++                py_str(&new.2),
++                py_str(&new.3)
++            );
++        }
++        Ok(())
++    }
++
++    async fn webrequest_settings(self: &Rc<Self>, req: WebRequest) -> ApiResult {
++        if req.get_request_type() == RequestType::POST {
++            log::debug!("webreq_args: {}", py_str(&Value::Object(req.get_args().clone())));
++            let mut gcodechange = false;
++            let mut modechanged = false;
++            let settings: Vec<String> = req.get_args().keys().cloned().collect();
++            for setting in settings {
++                let Some(kind) = self.config.borrow().get(&setting).and_then(kind_of) else { continue };
++                if setting == "snapshoturl" {
++                    log::debug!("snapshoturl cannot be changed via webrequest");
++                    continue;
++                }
++                let value = match kind {
++                    Kind::Str => json!(req.get_str(&setting)?),
++                    Kind::Bool => json!(req.get_boolean(&setting)?),
++                    Kind::Int => json!(req.get_int(&setting)?),
++                    Kind::Float => json!(req.get_float(&setting)?),
++                };
++                self.config.borrow_mut().insert(setting.clone(), value.clone());
++                let _ = server().database().insert_item_sync("timelapse", &json!(format!("config.{}", setting)), value.clone());
++                if setting == "camera" {
++                    self.get_webcam_config();
++                }
++                if SETTINGS_WITH_GCODECHANGE.contains(&setting.as_str()) {
++                    gcodechange = true;
++                }
++                if setting == "mode" {
++                    modechanged = true;
++                }
++                log::debug!("changed setting: {} value: {} type: <class '{}'>", setting, py_str(&value), crate::pyfmt::py_type_name(&value));
++            }
++            if modechanged {
++                let t = self.clone();
++                if self.cfg_str("mode") == "hyperlapse" {
++                    if !self.hyperlapserunning.get() && self.printing.get() {
++                        spawn(async move { t.start_hyperlapse().await });
++                    }
++                } else if self.hyperlapserunning.get() {
++                    spawn(async move { t.stop_hyperlapse().await });
++                }
++            }
++            if gcodechange {
++                let t = self.clone();
++                spawn(async move { t.setgcodevariables().await });
++            }
++        }
++        Ok(Value::Object(self.config.borrow().clone()))
++    }
++
++    async fn run_gcode(&self, gcommand: &str) {
++        log::debug!("run gcommand: {}", gcommand);
++        if let Err(e) = server().klippy_apis().run_gcode(gcommand).await {
++            log::error!("Error executing GCode {}\n{}", gcommand, e.message);
++        }
++    }
++
++    async fn setgcodevariables(&self) {
++        let g = |k: &str| self.cfg_str(k);
++        let gcommand = format!(
++            "_SET_TIMELAPSE_SETUP  ENABLE={} VERBOSE={} PARK_ENABLE={} PARK_POS={} CUSTOM_POS_X={} CUSTOM_POS_Y={} CUSTOM_POS_DZ={} TRAVEL_SPEED={} RETRACT_SPEED={} EXTRUDE_SPEED={} RETRACT_DISTANCE={} EXTRUDE_DISTANCE={} PARK_TIME={} FW_RETRACT={}",
++            g("enabled"),
++            g("gcode_verbose"),
++            g("parkhead"),
++            g("parkpos"),
++            g("park_custom_pos_x"),
++            g("park_custom_pos_y"),
++            g("park_custom_pos_dz"),
++            g("park_travel_speed"),
++            g("park_retract_speed"),
++            g("park_extrude_speed"),
++            g("park_retract_distance"),
++            g("park_extrude_distance"),
++            g("park_time"),
++            g("fw_retract"),
++        );
++        self.run_gcode(&gcommand).await;
++    }
++
++    fn call_newframe(self: &Rc<Self>, hyperlapse: bool) {
++        if !self.cfg_bool("enabled") {
++            log::info!("NEW_FRAME macro ignored timelapse is disabled");
++        } else if self.cfg_str("mode") != "hyperlapse" {
++            self.spawn_newframe_callbacks();
++        } else if !hyperlapse {
++            log::info!("ignoring non hyperlapse triggered macrosin hyperlapse mode");
++        } else if self.takingframe.get() {
++            log::info!("last take frame hasn't completed ignoring take frame command");
++        } else {
++            self.takingframe.set(true);
++            self.spawn_newframe_callbacks();
++        }
++    }
++
++    fn spawn_newframe_callbacks(self: &Rc<Self>) {
++        // release parked head after park time is passed
++        let park_time = Duration::from_secs_f64(self.cfg_f64("park_time").max(0.0));
++        let t = self.clone();
++        spawn(async move {
++            tokio::time::sleep(park_time).await;
++            t.run_gcode("SET_GCODE_VARIABLE MACRO=TIMELAPSE_TAKE_FRAME VARIABLE=takingframe VALUE=False").await;
++        });
++        // capture the frame after stream delay is passed
++        let stream_delay = Duration::from_secs_f64(self.cfg_f64("stream_delay_compensation").max(0.0));
++        let t = self.clone();
++        spawn(async move {
++            tokio::time::sleep(stream_delay).await;
++            t.newframe().await;
++        });
++    }
++
++    async fn start_hyperlapse(&self) {
++        let hyperlapse_cycle = self.cfg("hyperlapse_cycle");
++        let park_time = self.cfg("park_time");
++        if hyperlapse_cycle.as_f64().unwrap_or(0.0) - park_time.as_f64().unwrap_or(0.0) >= 1.0 {
++            self.run_gcode(&format!("HYPERLAPSE ACTION=START CYCLE={}", py_str(&hyperlapse_cycle))).await;
++            self.hyperlapserunning.set(true);
++        } else {
++            log::info!(
++                "WARNING: Blocked start of Hyperlapse, because hyperlapse_cycle ({}s) is smaller then or to close to park_time ({}s)",
++                py_str(&hyperlapse_cycle),
++                py_str(&park_time)
++            );
++        }
++    }
++
++    async fn stop_hyperlapse(&self) {
++        self.run_gcode("HYPERLAPSE ACTION=STOP").await;
++        self.hyperlapserunning.set(false);
++    }
++
++    async fn newframe(&self) {
++        // make sure webcamconfig is uptodate before grabbing a new frame
++        self.get_webcam_config();
++        let options = if self.wget_skip_cert { "--no-check-certificate " } else { "" };
++        self.framecount.set(self.framecount.get() + 1);
++        let framefile = format!("frame{:06}.jpg", self.framecount.get());
++        let cmd = format!("wget {}{} -O {}{}", options, self.cfg_str("snapshoturl"), self.temp_dir, framefile);
++        *self.lastframefile.borrow_mut() = framefile.clone();
++        log::debug!("cmd: {}", cmd);
++        let factory = Self::shell();
++        let cmdstatus = match factory.build_shell_command(&cmd, None, None, None, false, None) {
++            Ok(scmd) => scmd.run(&factory, RunOpts { timeout: 2.0, verbose: false, ..Default::default() }).await,
++            Err(e) => {
++                log::error!("Error running cmd '{}'\n{}", cmd, e.message);
++                false
++            }
++        };
++        let mut result = json!({"action": "newframe"});
++        if cmdstatus {
++            result["frame"] = json!(self.framecount.get().to_string());
++            result["framefile"] = json!(framefile);
++            result["status"] = json!("success");
++        } else {
++            log::info!("getting newframe failed: {}", cmd);
++            self.framecount.set(self.framecount.get() - 1);
++            result["status"] = json!("error");
++        }
++        self.notify_event(result);
++        self.takingframe.set(false);
++    }
++
++    fn handle_status_update(self: &Rc<Self>, status: &Map<String, Value>) {
++        if status.get("print_stats").and_then(|p| p.get("state")).and_then(|s| s.as_str()) == Some("cancelled") {
++            self.printing.set(false);
++            let t = self.clone();
++            spawn(async move { t.stop_hyperlapse().await });
++        }
++    }
++
++    fn handle_gcode_response(self: &Rc<Self>, gresponse: &str) {
++        if gresponse == "File selected" {
++            // print_started
++            self.cleanup();
++            self.printing.set(true);
++            // start hyperlapse if mode is set
++            if self.cfg_str("mode") == "hyperlapse" {
++                let t = self.clone();
++                spawn(async move { t.start_hyperlapse().await });
++            }
++        } else if gresponse == "Done printing file" {
++            // print_done
++            self.printing.set(false);
++            // stop hyperlapse if mode is set
++            if self.cfg_str("mode") == "hyperlapse" {
++                let t = self.clone();
++                spawn(async move { t.stop_hyperlapse().await });
++            }
++            if self.cfg_bool("enabled") {
++                if self.cfg_bool("saveframes") {
++                    let t = self.clone();
++                    spawn(async move {
++                        t.save_frames_zip().await;
++                    });
++                }
++                if self.cfg_bool("autorender") {
++                    let t = self.clone();
++                    spawn(async move {
++                        t.render().await;
++                    });
++                }
++            }
++        }
++    }
++
++    fn cleanup(&self) {
++        log::debug!("cleanup frame directory");
++        for f in frame_files(&self.temp_dir) {
++            let _ = std::fs::remove_file(f);
++        }
++        self.framecount.set(0);
++        self.lastframefile.borrow_mut().clear();
++    }
++
++    /// The printed file's name, and the output name timelapse_<file>_<date>
++    async fn output_name(&self) -> (String, String) {
++        let pstats = server()
++            .klippy_apis()
++            .query_objects(&Map::from_iter([("print_stats".to_string(), Value::Null)]))
++            .await
++            .ok()
++            .and_then(|r| r.get("print_stats").cloned())
++            .unwrap_or(json!({}));
++        let gcodefilename = file_name(pstats.get("filename").and_then(|f| f.as_str()).unwrap_or(""));
++        let date_time = crate::utils::local_strftime(&self.cfg_str("time_format_code"));
++        let outfile = format!("timelapse_{}_{}", gcodefilename, date_time);
++        (gcodefilename, outfile)
++    }
++
++    async fn save_frames_zip(&self) -> Value {
++        let filelist = frame_files(&self.temp_dir);
++        self.framecount.set(filelist.len() as i64);
++        let mut result = json!({"action": "saveframes"});
++        if filelist.is_empty() || self.saveisrunning.get() {
++            // python leaves these two results without a status
++            return result;
++        }
++        self.saveisrunning.set(true);
++        let (_, outfile) = self.output_name().await;
++        let out_full = format!("{}_frames.zip", outfile);
++        let written: std::io::Result<()> = (|| {
++            let mut zip = zip::ZipWriter::new(std::fs::File::create(format!("{}{}", self.out_dir, out_full))?);
++            let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
++            for frame in &filelist {
++                zip.start_file(file_name(frame), opts)?;
++                std::io::copy(&mut std::fs::File::open(frame)?, &mut zip)?;
++            }
++            zip.finish()?;
++            Ok(())
++        })();
++        match written {
++            Ok(()) => {
++                log::info!("saved frames: {}_frames.zip", outfile);
++                result["status"] = json!("finished");
++                result["zipfile"] = json!(out_full);
++            }
++            Err(e) => log::error!("saving frames failed: {}", e),
++        }
++        self.saveisrunning.set(false);
++        result
++    }
++
++    /// ffmpeg's -vf for the rotation and flip settings (python's branch order)
++    fn filter_param(&self) -> String {
++        let rotation = self.cfg_f64("rotation");
++        let (flip_x, flip_y) = (self.cfg_bool("flip_x"), self.cfg_bool("flip_y"));
++        let vf = if rotation == 90.0 && flip_y {
++            "transpose=3".to_string()
++        } else if rotation == 90.0 {
++            "transpose=1".to_string()
++        } else if rotation == 180.0 {
++            "hflip,vflip".to_string()
++        } else if rotation == 270.0 {
++            "transpose=2".to_string()
++        } else if rotation > 0.0 {
++            format!("rotate={}", crate::pyfmt::py_float_repr(rotation * (std::f64::consts::PI / 180.0)))
++        } else if flip_x && flip_y {
++            "hflip,vflip".to_string()
++        } else if flip_x {
++            "hflip".to_string()
++        } else if flip_y {
++            "vflip".to_string()
++        } else {
++            return String::new();
++        };
++        format!(" -vf '{}'", vf)
++    }
++
++    async fn render(self: &Rc<Self>) -> Value {
++        let mut filelist = frame_files(&self.temp_dir);
++        self.framecount.set(filelist.len() as i64);
++        let mut result = json!({"action": "render"});
++        // make sure webcamconfig is uptodate for the rotation/flip feature
++        self.get_webcam_config();
++        let (status, msg);
++        if filelist.is_empty() {
++            msg = "no frames to render, skip".to_string();
++            status = "skipped";
++        } else if self.renderisrunning.get() {
++            msg = "render is already running".to_string();
++            status = "running";
++        } else if !self.ffmpeg_installed {
++            msg = format!("{} not found, please install ffmpeg", self.ffmpeg_binary_path);
++            status = "error";
++            log::info!("timelapse: {}", msg);
++        } else {
++            self.renderisrunning.set(true);
++            let (gcodefilename, outfile) = self.output_name().await;
++            let inputfiles = format!("{}frame%6d.jpg", self.temp_dir);
++
++            // dublicate last frame
++            let mut duplicates = Vec::new();
++            let dup = self.cfg("duplicatelastframe").as_i64().unwrap_or(0);
++            if dup > 0 {
++                let lastframe = filelist.last().cloned().unwrap_or_default();
++                for i in 0..dup {
++                    let path = format!("{}frame{:06}.jpg", self.temp_dir, self.framecount.get() + i + 1);
++                    if let Err(err) = std::fs::copy(&lastframe, &path) {
++                        log::info!("duplicating last frame failed: {}", err);
++                    }
++                    duplicates.push(path);
++                }
++                filelist = frame_files(&self.temp_dir);
++                self.framecount.set(filelist.len() as i64);
++            }
++
++            // variable framerate
++            let fps = if self.cfg_bool("variable_fps") {
++                let fps = (self.framecount.get() as f64 / self.cfg_f64("targetlength")) as i64;
++                json!(fps.min(self.cfg("variable_fps_max").as_i64().unwrap_or(60)).max(self.cfg("variable_fps_min").as_i64().unwrap_or(5)))
++            } else {
++                self.cfg("output_framerate")
++            };
++            let filter_param = self.filter_param();
++            let cmd = format!(
++                "{} -r {} -i '{}'{} -threads 2 -g 5 -crf {} -vcodec libx264 -pix_fmt {} -an {} '{}{}.mp4' -y",
++                self.ffmpeg_binary_path,
++                py_str(&fps),
++                inputfiles,
++                filter_param,
++                self.cfg_str("constant_rate_factor"),
++                self.cfg_str("pixelformat"),
++                self.cfg_str("extraoutputparams"),
++                self.temp_dir,
++                outfile
++            );
++
++            // log and notify ws
++            log::info!("start FFMPEG: {}", cmd);
++            result["status"] = json!("started");
++            result["framecount"] = json!(self.framecount.get().to_string());
++            result["settings"] = json!({
++                "framerate": fps,
++                "crf": self.cfg("constant_rate_factor"),
++                "pixelformat": self.cfg("pixelformat"),
++            });
++            self.notify_event(result.clone());
++
++            // run the command
++            let factory = Self::shell();
++            let t = Rc::downgrade(self);
++            let cb: OutputCallback = Rc::new(move |line| {
++                if let Some(t) = t.upgrade() {
++                    t.ffmpeg_cb(&line);
++                }
++            });
++            let opts = || RunOpts { timeout: 9999999999.0, verbose: true, log_complete: false, ..Default::default() };
++            let cmdstatus = match factory.build_shell_command(&cmd, Some(cb), None, None, false, None) {
++                Ok(scmd) => scmd.run(&factory, opts()).await,
++                Err(e) => {
++                    log::error!("Error running cmd '{}'\n{}", cmd, e.message);
++                    false
++                }
++            };
++
++            // check success
++            if cmdstatus {
++                status = "success";
++                msg = format!("Rendering Video successful: {}.mp4", outfile);
++                result["filename"] = json!(format!("{}.mp4", outfile));
++                result["printfile"] = json!(gcodefilename);
++                if let Some(o) = result.as_object_mut() {
++                    o.shift_remove("settings");
++                }
++                // move finished output file to output directory
++                let src = format!("{}{}.mp4", self.temp_dir, outfile);
++                if let Err(err) = move_file(&src, &format!("{}{}.mp4", self.out_dir, outfile)) {
++                    log::info!("moving output file failed: {}", err);
++                }
++                // copy image preview
++                if self.cfg_bool("previewimage") {
++                    let preview_file = format!("{}.jpg", outfile);
++                    let preview_path = format!("{}{}", self.out_dir, preview_file);
++                    match std::fs::copy(filelist.last().map(String::as_str).unwrap_or(""), &preview_path) {
++                        Err(err) => log::info!("copying preview image failed: {}", err),
++                        Ok(_) => result["previewimage"] = json!(preview_file),
++                    }
++                    // apply rotation previewimage if needed
++                    let extra = self.cfg_str("extraoutputparams");
++                    if !filter_param.is_empty() || !extra.is_empty() {
++                        let cmd = format!(
++                            "{} -i '{}'{} -an {} '{}' -y",
++                            self.ffmpeg_binary_path, preview_path, filter_param, extra, preview_path
++                        );
++                        log::info!("Rotate preview image cmd: {}", cmd);
++                        match factory.build_shell_command(&cmd, None, None, None, false, None) {
++                            Ok(scmd) => {
++                                scmd.run(&factory, opts()).await;
++                            }
++                            Err(e) => log::error!("Error running cmd '{}'\n{}", cmd, e.message),
++                        }
++                    }
++                }
++            } else {
++                status = "error";
++                let resp = self.lastcmdreponse.borrow().clone();
++                msg = format!("Rendering Video failed: {} : {}", cmd, resp);
++                result["cmd"] = json!(cmd);
++                result["cmdresponse"] = json!(resp);
++            }
++            self.renderisrunning.set(false);
++
++            // cleanup duplicates
++            for dupe in duplicates {
++                if let Err(err) = std::fs::remove_file(&dupe) {
++                    log::info!("remove duplicate failed: {}", err);
++                }
++            }
++        }
++
++        // log and notify ws
++        log::info!("{}", msg);
++        result["status"] = json!(status);
++        result["msg"] = json!(msg);
++        self.notify_event(result.clone());
++
++        // confirm render finish to stop the render macro loop
++        if self.byrendermacro.get() {
++            self.run_gcode("SET_GCODE_VARIABLE MACRO=TIMELAPSE_RENDER VARIABLE=render VALUE=False").await;
++            self.byrendermacro.set(false);
++        }
++        result
++    }
++
++    fn ffmpeg_cb(&self, response: &[u8]) {
++        let text = String::from_utf8_lossy(response).to_string();
++        *self.lastcmdreponse.borrow_mut() = text.clone();
++        let Some(frame) = progress_frame(&text) else { return };
++        let percent = (frame / self.framecount.get().max(1) as f64 * 100.0).min(100.0) as i64;
++        if self.lastrenderprogress.get() != percent {
++            self.lastrenderprogress.set(percent);
++            self.notify_event(json!({"action": "render", "status": "running", "progress": percent}));
++        }
++    }
++
++    fn notify_event(&self, result: Value) {
++        log::debug!("notify_event: {}", py_str(&result));
++        server().send_event("timelapse:timelapse_event", vec![result]);
++    }
++}
++
++#[async_trait(?Send)]
++impl Component for Timelapse {
++    fn has_init(&self) -> bool {
++        true
++    }
++
++    async fn component_init(self: Rc<Self>) -> Result<(), ServerError> {
++        self.get_webcam_config();
++        Ok(())
++    }
++}
++
++pub fn load_component(config: &ConfigHelper) -> Result<Rc<Timelapse>, ConfigError> {
++    Timelapse::new(config)
++}
++
++#[cfg(test)]
++mod tests {
++    // the frame numbers python's regex finds in these lines (checked with CPython)
++    #[test]
++    fn progress_frame_as_python() {
++        let line = "frame=  120 fps= 15 q=28.0 size=     256kB time=00:00:04.00 bitrate= 524.3kbits/s speed=0.5x";
++        assert_eq!(super::progress_frame(line), Some(120.0));
++        assert_eq!(super::progress_frame("Input #0, image2, from frame%6d.jpg:"), None);
++        assert_eq!(super::progress_frame("  Stream #0:0: Video: mjpeg, yuvj420p(pc), 1280x720, 30 fps"), Some(0.0));
++    }
++}

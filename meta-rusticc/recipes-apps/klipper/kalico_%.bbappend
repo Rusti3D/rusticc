@@ -14,3 +14,12 @@ do_install:append() {
     sed -i -e 's/while COSMOS is updated/while Rusticc is updated/' \
         ${D}${sysconfdir}/klipper/config/klipper-readonly/shell.cfg
 }
+
+# moonraker-timelapse c7fff11's macros (klipper_macro/timelapse.cfg) for
+# Moonruster's timelapse component; klipper-readonly/*.cfg is included by
+# printer.cfg. A frame per layer needs TIMELAPSE_TAKE_FRAME in the slicer's
+# layer-change G-code.
+SRC_URI += "file://timelapse.cfg"
+do_install:append() {
+    install -m 0644 ${UNPACKDIR}/timelapse.cfg ${D}${sysconfdir}/klipper/config/klipper-readonly/
+}

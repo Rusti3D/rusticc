@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 05:49:18 +0200
-Subject: [PATCH 3/4] rusticc: Moonruster's update entry as COSMOS's
+Subject: [PATCH 3/5] rusticc: Moonruster's update entry as COSMOS's
  Moonraker's (no self-update)
 
 The image updates Moonruster (SWUpdate, read-only rootfs): the "moonraker"
