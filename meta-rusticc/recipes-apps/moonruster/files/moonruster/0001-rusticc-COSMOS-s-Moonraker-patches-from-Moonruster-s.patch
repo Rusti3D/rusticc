@@ -277,7 +277,7 @@ index 6ce7cee..09ea8ee 100644
          self.provider.clone()
      }
 diff --git a/src/components/machine/providers.rs b/src/components/machine/providers.rs
-index f24fe50..a35d67d 100644
+index f24fe50..19bf124 100644
 --- a/src/components/machine/providers.rs
 +++ b/src/components/machine/providers.rs
 @@ -10,6 +10,7 @@ pub enum ProviderKind {
@@ -365,7 +365,7 @@ index f24fe50..a35d67d 100644
  
      pub(super) async fn update_service_status(&self, sequence: u64, notify: bool) {
 +        if self.kind == ProviderKind::Sysvinit {
-+            if sequence % SYSV_STATUS_SEQUENCE == 0 {
++            if sequence.is_multiple_of(SYSV_STATUS_SEQUENCE) {
 +                let svcs: Vec<String> = self.available_services.borrow().keys().cloned().collect();
 +                for svc in svcs {
 +                    self.update_sysv_state(&svc, notify).await;
