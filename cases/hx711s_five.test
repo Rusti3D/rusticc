@@ -1,0 +1,5 @@
+SHOULD_FAIL
+CONFIG hx711s_five.cfg
+DICTIONARY atmega2560.dict bed=cc1_bed.dict
+
+G4 P100

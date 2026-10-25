@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sat, 24 Oct 2026 21:05:41 +0300
+Subject: [PATCH 07/14] rusticc: pcprof dump has glibc mallinfo2; memmap.sh
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pcprof.rs          | 10 ++++++++++
+ tools/pcprof_report.py |  3 +++
+ 2 files changed, 13 insertions(+)
+
+diff --git a/src/pcprof.rs b/src/pcprof.rs
+index cd6cea1..04cf5f7 100644
+--- a/src/pcprof.rs
++++ b/src/pcprof.rs
+@@ -73,6 +73,16 @@ pub fn start() {
+                 out += &format!("map {}\n", l);
+             }
+         }
++        // glibc heap: arena = brk/arena bytes, hblkhd = mmapped chunks,
++        // uordblks = in use, fordblks = free but held
++        #[cfg(target_env = "gnu")]
++        {
++            let m = unsafe { libc::mallinfo2() };
++            out += &format!(
++                "mallinfo arena={} hblkhd={} uordblks={} fordblks={} keepcost={} hblks={}\n",
++                m.arena, m.hblkhd, m.uordblks, m.fordblks, m.keepcost, m.hblks
++            );
++        }
+         out += &format!("samples {} interval_us 2000 secs {}\n", n, secs);
+         let mut rows: Vec<_> = hist.into_iter().collect();
+         rows.sort_by(|a, b| b.1.cmp(&a.1));
+diff --git a/tools/pcprof_report.py b/tools/pcprof_report.py
+index f134ca5..f702bda 100644
+--- a/tools/pcprof_report.py
++++ b/tools/pcprof_report.py
+@@ -15,6 +15,9 @@ only_tid = sys.argv[6] if len(sys.argv) > 6 else None
+ maps, rows, total = [], [], 0
+ for line in open(prof):
+     f = line.split()
++    if f[0] == "mallinfo":
++        print(line.strip())
++        continue
+     if f[0] == "map":
+         lo, hi = (int(x, 16) for x in f[1].split("-"))
+         maps.append((lo, hi, int(f[3], 16), f[-1]))

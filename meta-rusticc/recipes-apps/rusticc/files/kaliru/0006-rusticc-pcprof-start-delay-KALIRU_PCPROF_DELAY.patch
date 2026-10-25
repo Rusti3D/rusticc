@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sat, 24 Oct 2026 20:56:45 +0300
+Subject: [PATCH 06/14] rusticc: pcprof start delay (KALIRU_PCPROF_DELAY)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pcprof.rs | 21 ++++++++++++---------
+ 1 file changed, 12 insertions(+), 9 deletions(-)
+
+diff --git a/src/pcprof.rs b/src/pcprof.rs
+index 91ba4f0..cd6cea1 100644
+--- a/src/pcprof.rs
++++ b/src/pcprof.rs
+@@ -46,16 +46,19 @@ extern "C" fn on_prof(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut
+ pub fn start() {
+     let Some(path) = std::env::var_os("KALIRU_PCPROF") else { return };
+     let secs: u64 = std::env::var("KALIRU_PCPROF_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+-    unsafe {
+-        let mut sa: libc::sigaction = std::mem::zeroed();
+-        sa.sa_sigaction = on_prof as usize;
+-        sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
+-        libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
+-        let tv = libc::timeval { tv_sec: 0, tv_usec: 2000 };
+-        let it = libc::itimerval { it_interval: tv, it_value: tv };
+-        libc::setitimer(libc::ITIMER_PROF, &it, std::ptr::null_mut());
+-    }
++    // KALIRU_PCPROF_DELAY: seconds before sampling starts (skip startup)
++    let delay: u64 = std::env::var("KALIRU_PCPROF_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+     std::thread::spawn(move || {
++        std::thread::sleep(std::time::Duration::from_secs(delay));
++        unsafe {
++            let mut sa: libc::sigaction = std::mem::zeroed();
++            sa.sa_sigaction = on_prof as usize;
++            sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
++            libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
++            let tv = libc::timeval { tv_sec: 0, tv_usec: 2000 };
++            let it = libc::itimerval { it_interval: tv, it_value: tv };
++            libc::setitimer(libc::ITIMER_PROF, &it, std::ptr::null_mut());
++        }
+         std::thread::sleep(std::time::Duration::from_secs(secs));
+         let n = COUNT.load(Ordering::Relaxed).min(SLOTS);
+         let mut hist: std::collections::HashMap<(usize, usize, usize), usize> = std::collections::HashMap::new();

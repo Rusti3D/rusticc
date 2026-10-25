@@ -1,0 +1,528 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sat, 24 Oct 2026 18:54:57 +0300
+Subject: [PATCH 02/14] rusticc: COSMOS host patches (configfile, logging,
+ thermistor, probe, shaper, load cell)
+
+- 0001-remove-save-config-subfile-check: no autosave strip on load, no
+  include conflict check on SAVE_CONFIG
+- 0004-allow-config-exclude: [!section] removes a defined section
+- 0001-Reduce-log-rotate-threshold: queuelogger rotates by size (python 3.15
+  RotatingFileHandler, 5 MiB, 2 backups)
+- 0001-implement-pulldown-resistor-in-thermistor-calc: pulldown_resistor on
+  thermistors and custom thermistors
+- 0001-probe-home-z-includes-z-offset, 0001-force-specific-input-shaper
+  (FORCE_SHAPER), 0002-reduce-calibration-difference-tolerance (0.1 %)
+
+Verified: rusticc/cases cosmos + cosmos_exclude_bad identical to the COSMOS
+reference (full set 151/152, printers/13 timing as before); unit tests of
+calc_temp/calc_adc with pulldown against COSMOS's python, and of the size
+rollover.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/configfile.rs                 |  43 ++++-------
+ src/extras/load_cell/load_cell.rs |   5 +-
+ src/extras/probe.rs               |   3 +-
+ src/extras/resonance_tester.rs    |   9 ++-
+ src/extras/shaper_calibrate.rs    |  10 ++-
+ src/extras/thermistor.rs          |  80 ++++++++++++++++---
+ src/queuelogger.rs                | 124 +++++++++++++++++++++++++++---
+ 7 files changed, 218 insertions(+), 56 deletions(-)
+
+diff --git a/src/configfile.rs b/src/configfile.rs
+index 48a06ce..b04e19c 100644
+--- a/src/configfile.rs
++++ b/src/configfile.rs
+@@ -870,8 +870,19 @@ impl PrinterConfig {
+                     continue;
+                 }
+             }
+-            match header.as_deref().and_then(|h| h.strip_prefix("include ")) {
++            let header = header.as_deref();
++            match header.and_then(|h| h.strip_prefix("include ")) {
+                 Some(spec) => pending_include = Some(py_strip(spec).to_string()),
++                // COSMOS 0004-allow-config-exclude: [!section] removes a
++                // section defined before it
++                None if header.is_some_and(|h| h.starts_with('!')) => {
++                    self.parse_config_buffer(&mut buffer, filename, fileconfig)?;
++                    let section_name = py_strip(&header.unwrap()[1..]);
++                    if !fileconfig.borrow().has_section(section_name) {
++                        return Err(error(format!("Section '{}' does not exist for exclusion", section_name)));
++                    }
++                    fileconfig.borrow_mut().remove_section(section_name);
++                }
+                 None => {
+                     let line = match line.find(INCLUDE_TAG) {
+                         Some(p) => format!("{}{}", &line[..p], fix_include_path(filename, &line[p + INCLUDE_TAG.len()..])?),
+@@ -915,9 +926,9 @@ impl PrinterConfig {
+     pub fn read_main_config(&mut self) -> Result<ConfigWrapper> {
+         let filename = self.config_file.clone();
+         let data = self.read_config_file(&filename)?;
++        // (COSMOS 0001-remove-save-config-subfile-check: autosave keeps the
++        // options the regular config also has)
+         let (regular_data, autosave_data) = self.find_autosave_data(&data);
+-        let regular_config = self.build_config_wrapper(&regular_data, &filename)?;
+-        let autosave_data = self.strip_duplicates(&autosave_data, &regular_config);
+         self.autosave = Some(self.build_config_wrapper(&autosave_data, &filename)?);
+         self.build_config_wrapper(&format!("{}{}", regular_data, autosave_data), &filename)
+     }
+@@ -1090,29 +1101,6 @@ impl PrinterConfig {
+         }
+     }
+ 
+-    /// Err(msg) where python raises gcode.error(msg)
+-    fn disallow_include_conflicts(&self, regular_data: &str, cfgname: &str) -> std::result::Result<(), String> {
+-        let config = self.build_config_wrapper(regular_data, cfgname).map_err(|e| e.message)?;
+-        let autosave = self.autosave.as_ref().unwrap().fileconfig.borrow();
+-        let fc = config.fileconfig.borrow();
+-        for section in autosave.sections() {
+-            for option in autosave.options(&section).map_err(|e| e.message)? {
+-                if fc.has_option(&section, &option) {
+-                    // They conflict only if they are not the same value
+-                    let included_value = fc.get(&section, &option).map_err(|e| e.message)?;
+-                    let autosave_value = autosave.get(&section, &option).map_err(|e| e.message)?;
+-                    if included_value != autosave_value {
+-                        return Err(format!(
+-                            "SAVE_CONFIG section '{}' option '{}' value '{}' conflicts with included value '{}' ",
+-                            section, option, autosave_value, included_value
+-                        ));
+-                    }
+-                }
+-            }
+-        }
+-        Ok(())
+-    }
+-
+     fn write_backup(&self, cfgpath: &str, cfgdata: &str) -> std::result::Result<(), String> {
+         let printercfg = &self.config_file;
+         let configdir = pyglob::dirname(printercfg);
+@@ -1229,8 +1217,7 @@ impl PrinterConfig {
+         if autosave_includes {
+             self.save_includes(&cfgname, &data, &mut HashSet::new())?;
+         }
+-        // NOW we're safe to check for conflicts
+-        self.disallow_include_conflicts(&regular_data, &cfgname)?;
++        // (COSMOS: no _disallow_include_conflicts)
+         let data = format!("{}{}", py_rstrip(&regular_data), autosave_data);
+         self.write_backup(&cfgname, &data)?;
+         Ok(true)
+diff --git a/src/extras/load_cell/load_cell.rs b/src/extras/load_cell/load_cell.rs
+index bb7c36b..71e0deb 100644
+--- a/src/extras/load_cell/load_cell.rs
++++ b/src/extras/load_cell/load_cell.rs
+@@ -463,9 +463,10 @@ impl LoadCellGuidedCalibrationHelper {
+                 "ERROR: Tare and Calibration readings are the same!\nCheck wiring and validate sensor with READ_LOAD_CELL command.",
+             ));
+         }
+-        if (cal_percent - self.tare_percent.get()).abs() < 1.0 {
++        // COSMOS 0002-reduce-calibration-difference-tolerance: 0.1 %
++        if (cal_percent - self.tare_percent.get()).abs() < 0.1 {
+             return Err(KError::command(
+-                "ERROR: Tare and Calibration readings are less than 1% different!\nUse more force when calibrating or a higher sensor gain.",
++                "ERROR: Tare and Calibration readings are less than 0.1% different!\nUse more force when calibrating or a higher sensor gain.",
+             ));
+         }
+         // only set _counts_per_gram after all errors are raised
+diff --git a/src/extras/probe.rs b/src/extras/probe.rs
+index 6b6dbd0..dad4c74 100644
+--- a/src/extras/probe.rs
++++ b/src/extras/probe.rs
+@@ -942,7 +942,8 @@ impl PrinterProbe {
+             let toolhead = self.toolhead()?;
+             toolhead.get_last_move_time()?;
+             let mut toolhead_pos = toolhead.get_position();
+-            toolhead_pos[2] -= self.last_z_result.get();
++            // COSMOS 0001-probe-home-z-includes-z-offset
++            toolhead_pos[2] = toolhead_pos[2] - self.last_z_result.get() + self.z_offset;
+             toolhead.set_position(&toolhead_pos, "z")?;
+         }
+         Ok(())
+diff --git a/src/extras/resonance_tester.rs b/src/extras/resonance_tester.rs
+index ef19c53..b4da5e0 100644
+--- a/src/extras/resonance_tester.rs
++++ b/src/extras/resonance_tester.rs
+@@ -662,6 +662,13 @@ impl ResonanceTester {
+             Some(m) => Some(gcmd.get_float("MAX_SMOOTHING", Some(m), lim)?),
+             None => gcmd.get_float_opt("MAX_SMOOTHING", lim)?,
+         };
++        // COSMOS 0001-force-specific-input-shaper
++        let force_shaper = gcmd.get_opt("FORCE_SHAPER").map(|s| s.to_lowercase());
++        if let Some(f) = &force_shaper {
++            if !crate::extras::shaper_defs::INPUT_SHAPERS.iter().any(|s| s.name == f) {
++                return Err(gcmd.error(format!("Unsupported shaper type: {}", f)));
++            }
++        }
+         let name_suffix = gcmd.get_or("NAME", &strftime_local("%Y%m%d_%H%M%S"));
+         if !is_valid_name(&name_suffix) {
+             return Err(gcmd.error("Invalid NAME parameter"));
+@@ -689,7 +696,7 @@ impl ResonanceTester {
+             let scv = toolhead_status(&toolhead, systime, "square_corner_velocity");
+             let max_freq = self.get_max_calibration_freq();
+             let logger = |m: &str| gcmd.respond_info(m, true);
+-            let (best_shaper, all_shapers) = helper.find_best_shaper(data, scv, max_smoothing, Some(max_freq), Some(&logger))?;
++            let (best_shaper, all_shapers) = helper.find_best_shaper(data, force_shaper.as_ref().map(std::slice::from_ref), scv, max_smoothing, Some(max_freq), Some(&logger))?;
+             gcmd.respond_info(
+                 &format!(
+                     "Recommended shaper_type_{} = {}, shaper_freq_{} = {:.1} Hz",
+diff --git a/src/extras/shaper_calibrate.rs b/src/extras/shaper_calibrate.rs
+index df1be20..f0b8db1 100644
+--- a/src/extras/shaper_calibrate.rs
++++ b/src/extras/shaper_calibrate.rs
+@@ -415,12 +415,13 @@ impl ShaperCalibrate {
+         calibration_data.ok_or_else(|| KError::command(format!("Internal error processing accelerometer data {}", data_repr)))
+     }
+ 
+-    /// find_best_shaper(calibration_data, shapers=None, damping_ratio=None,
++    /// find_best_shaper(calibration_data, shapers, damping_ratio=None,
+     /// scv, shaper_freqs=None, max_smoothing, test_damping_ratios=None,
+     /// max_freq, logger)
+     pub fn find_best_shaper(
+         &self,
+         calibration_data: &CalibrationData,
++        shapers: Option<&[String]>,
+         scv: f64,
+         max_smoothing: Option<f64>,
+         max_freq: Option<f64>,
+@@ -429,7 +430,12 @@ impl ShaperCalibrate {
+         let mut best_shaper: Option<CalibrationResult> = None;
+         let mut all_shapers = vec![];
+         for (idx, shaper_cfg) in INPUT_SHAPERS.iter().enumerate() {
+-            if !AUTOTUNE_SHAPERS.contains(&shaper_cfg.name) {
++            // shapers or AUTOTUNE_SHAPERS (an empty list is falsy)
++            let wanted = match shapers.filter(|s| !s.is_empty()) {
++                Some(s) => s.iter().any(|n| n == shaper_cfg.name),
++                None => AUTOTUNE_SHAPERS.contains(&shaper_cfg.name),
++            };
++            if !wanted {
+                 continue;
+             }
+             let data = calibration_data.clone();
+diff --git a/src/extras/thermistor.rs b/src/extras/thermistor.rs
+index fbb0867..4d0e449 100644
+--- a/src/extras/thermistor.rs
++++ b/src/extras/thermistor.rs
+@@ -1,4 +1,7 @@
+ // Temperature measurements with thermistors (port of klippy/extras/thermistor.py)
++// Rusticc: with COSMOS's 0001-implement-pulldown-resistor-in-thermistor-calc
++// (pulldown_resistor: a resistor in parallel with the thermistor, the CC1's
++// CANVAS toolhead board has 100k)
+ //
+ // Copyright (C) 2016-2019  Kevin O'Connor <kevin@koconnor.net>
+ //
+@@ -27,14 +30,15 @@ fn py_log(x: f64) -> KResult<f64> {
+ pub struct Thermistor {
+     pullup: f64,
+     inline_resistor: f64,
++    pulldown_resistor: f64,
+     c1: Cell<f64>,
+     c2: Cell<f64>,
+     c3: Cell<f64>,
+ }
+ 
+ impl Thermistor {
+-    pub fn new(pullup: f64, inline_resistor: f64) -> Self {
+-        Thermistor { pullup, inline_resistor, c1: Cell::new(0.0), c2: Cell::new(0.0), c3: Cell::new(0.0) }
++    pub fn new(pullup: f64, inline_resistor: f64, pulldown_resistor: f64) -> Self {
++        Thermistor { pullup, inline_resistor, pulldown_resistor, c1: Cell::new(0.0), c2: Cell::new(0.0), c3: Cell::new(0.0) }
+     }
+ 
+     #[allow(clippy::too_many_arguments)]
+@@ -73,6 +77,22 @@ impl Thermistor {
+         self.c1.set(inv_t1 - self.c2.get() * ln_r1);
+         Ok(())
+     }
++
++    fn remove_pulldown(&self, r: f64) -> f64 {
++        if self.pulldown_resistor == 0.0 {
++            return r;
++        }
++        // The ADC sees the thermistor branch in parallel with pulldown_resistor.
++        let r = py_min(r, self.pulldown_resistor * 0.999999);
++        r * self.pulldown_resistor / (self.pulldown_resistor - r)
++    }
++
++    fn apply_pulldown(&self, r: f64) -> f64 {
++        if self.pulldown_resistor == 0.0 {
++            return r;
++        }
++        r * self.pulldown_resistor / (r + self.pulldown_resistor)
++    }
+ }
+ 
+ impl AdcConvert for Thermistor {
+@@ -80,7 +100,9 @@ impl AdcConvert for Thermistor {
+         // Calculate temperature from adc
+         let adc = py_max(0.00001, py_min(0.99999, adc));
+         let r = self.pullup * adc / (1.0 - adc);
+-        let ln_r = py_log(r - self.inline_resistor)?;
++        let r = self.remove_pulldown(r) - self.inline_resistor;
++        let r = py_max(0.0000001, r);
++        let ln_r = py_log(r)?;
+         let inv_t = self.c1.get() + self.c2.get() * ln_r + self.c3.get() * ln_r.powf(3.0);
+         Ok(1.0 / inv_t + KELVIN_TO_CELSIUS)
+     }
+@@ -105,25 +127,29 @@ impl AdcConvert for Thermistor {
+             (inv_t - self.c1.get()) / self.c2.get()
+         };
+         let r = ln_r.exp() + self.inline_resistor;
++        let r = self.apply_pulldown(r);
+         Ok(r / (self.pullup + r))
+     }
+ }
+ 
+-/// thermistor parameters: (t1, r1, beta) or the three points
++/// thermistor parameters: (t1, r1, beta) or the three points, and the
++/// pulldown_resistor
+ #[derive(Clone)]
+ pub enum ThermistorParams {
+-    Beta { t1: f64, r1: f64, beta: f64 },
+-    Points { t1: f64, r1: f64, t2: f64, r2: f64, t3: f64, r3: f64 },
++    Beta { t1: f64, r1: f64, beta: f64, pulldown_resistor: f64 },
++    Points { t1: f64, r1: f64, t2: f64, r2: f64, t3: f64, r3: f64, pulldown_resistor: f64 },
+ }
+ 
+ // Create an ADC converter with a thermistor
+ pub fn printer_thermistor(config: &ConfigWrapper, params: &ThermistorParams) -> KResult<Rc<dyn TempSensor>> {
+     let pullup = config.getfloat("pullup_resistor", 4700.0, Lim::new().above(0.0))?;
+     let inline_resistor = config.getfloat("inline_resistor", 0.0, Lim::new().min(0.0))?;
+-    let thermistor = Thermistor::new(pullup, inline_resistor);
++    let (ThermistorParams::Beta { pulldown_resistor, .. } | ThermistorParams::Points { pulldown_resistor, .. }) = *params;
++    let pulldown_resistor = config.getfloat("pulldown_resistor", pulldown_resistor, Lim::new().min(0.0))?;
++    let thermistor = Thermistor::new(pullup, inline_resistor, pulldown_resistor);
+     match *params {
+-        ThermistorParams::Beta { t1, r1, beta } => thermistor.setup_coefficients_beta(t1, r1, beta)?,
+-        ThermistorParams::Points { t1, r1, t2, r2, t3, r3 } => {
++        ThermistorParams::Beta { t1, r1, beta, .. } => thermistor.setup_coefficients_beta(t1, r1, beta)?,
++        ThermistorParams::Points { t1, r1, t2, r2, t3, r3, .. } => {
+             thermistor.setup_coefficients(t1, r1, t2, r2, t3, r3, config.get_name())?
+         }
+     }
+@@ -134,8 +160,10 @@ pub fn printer_thermistor(config: &ConfigWrapper, params: &ThermistorParams) ->
+ pub fn custom_thermistor(config: &ConfigWrapper) -> KResult<ThermistorParams> {
+     let t1 = config.getfloat("temperature1", Dflt::Required, Lim::new().min(KELVIN_TO_CELSIUS))?;
+     let r1 = config.getfloat("resistance1", Dflt::Required, Lim::new().min(0.0))?;
+-    if let Some(beta) = config.getfloat_opt("beta", Lim::new().above(0.0))? {
+-        return Ok(ThermistorParams::Beta { t1, r1, beta });
++    let beta = config.getfloat_opt("beta", Lim::new().above(0.0))?;
++    let pulldown_resistor = config.getfloat("pulldown_resistor", 0.0, Lim::new().min(0.0))?;
++    if let Some(beta) = beta {
++        return Ok(ThermistorParams::Beta { t1, r1, beta, pulldown_resistor });
+     }
+     let t2 = config.getfloat("temperature2", Dflt::Required, Lim::new().min(KELVIN_TO_CELSIUS))?;
+     let r2 = config.getfloat("resistance2", Dflt::Required, Lim::new().min(0.0))?;
+@@ -144,7 +172,7 @@ pub fn custom_thermistor(config: &ConfigWrapper) -> KResult<ThermistorParams> {
+     let mut pts = [(t1, r1), (t2, r2), (t3, r3)];
+     pts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+     let [(t1, r1), (t2, r2), (t3, r3)] = pts;
+-    Ok(ThermistorParams::Points { t1, r1, t2, r2, t3, r3 })
++    Ok(ThermistorParams::Points { t1, r1, t2, r2, t3, r3, pulldown_resistor })
+ }
+ 
+ pub fn load_config_prefix(config: &ConfigWrapper) -> KResult<PObj> {
+@@ -154,3 +182,31 @@ pub fn load_config_prefix(config: &ConfigWrapper) -> KResult<PObj> {
+     pheaters.add_sensor_factory(&name, Rc::new(move |config: &ConfigWrapper| printer_thermistor(config, &params)));
+     Ok(none_object())
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// calc_temp / calc_adc with pulldown_resistor, as COSMOS's python gives them
++    #[test]
++    fn pulldown() {
++        let t = Thermistor::new(4700.0, 0.0, 100000.0);
++        t.setup_coefficients_beta(25.0, 100000.0, 3950.0).unwrap();
++        let temps: Vec<f64> = [0.0, 0.01, 0.1, 0.5, 0.9, 0.95, 0.99, 0.999, 1.0].iter().map(|a| t.calc_temp(*a).unwrap()).collect();
++        assert_eq!(temps, [-3260.690620222191, 432.6971709805599, 220.6760141405802, 112.63371896172578, 32.15469230477049, -16.157906540315253, -127.19898313194969, -127.19898313194969, -127.19898313194969]);
++        let adcs: Vec<f64> = [-300.0, 0.0, 25.0, 100.0, 200.0, 300.0].iter().map(|x| t.calc_adc(*x).unwrap()).collect();
++        assert_eq!(adcs, [1.0, 0.9425252593532268, 0.9140767824497258, 0.5811196468025761, 0.13588794252253147, 0.03554538964588165]);
++        let t = Thermistor::new(4700.0, 50.0, 47000.0);
++        t.setup_coefficients(25.0, 100000.0, 150.0, 1641.9, 250.0, 226.15, "").unwrap();
++        let temps: Vec<f64> = [0.0, 0.01, 0.1, 0.5, 0.9, 0.95, 0.99, 0.999, 1.0].iter().map(|a| t.calc_temp(*a).unwrap()).collect();
++        assert_eq!(temps, [-591.0510318859599, -591.0510318859599, 207.50043532466458, 106.85399436502223, -4.657397858758088, -137.5353184396466, -137.5353184396466, -137.5353184396466, -137.5353184396466]);
++        let adcs: Vec<f64> = [-300.0, 0.0, 25.0, 100.0, 200.0, 300.0].iter().map(|x| t.calc_adc(*x).unwrap()).collect();
++        assert_eq!(adcs, [1.0, 0.8975267344533139, 0.8718574354058647, 0.5449169839822805, 0.11239447773464356, 0.032275935954009405]);
++        let t = Thermistor::new(4700.0, 0.0, 0.0);
++        t.setup_coefficients_beta(25.0, 100000.0, 3950.0).unwrap();
++        let temps: Vec<f64> = [0.0, 0.01, 0.1, 0.5, 0.9, 0.95, 0.99, 0.999, 1.0].iter().map(|a| t.calc_temp(*a).unwrap()).collect();
++        assert_eq!(temps, [-3260.689558202203, 432.75707098972225, 220.9994789393936, 114.45613240847592, 45.707426361634475, 27.568766143873177, -6.003183074855997, -42.122234336944786, -91.15315302601343]);
++        let adcs: Vec<f64> = [-300.0, 0.0, 25.0, 100.0, 200.0, 300.0].iter().map(|x| t.calc_adc(*x).unwrap()).collect();
++        assert_eq!(adcs, [1.0, 0.9862132098380977, 0.9551098376313276, 0.5974372247265058, 0.13676140111700302, 0.03560487233171683]);
++    }
++}
+diff --git a/src/queuelogger.rs b/src/queuelogger.rs
+index 8a5ace7..cd7aa02 100644
+--- a/src/queuelogger.rs
++++ b/src/queuelogger.rs
+@@ -1,6 +1,8 @@
+ // Code to implement asynchronous logging from a background thread
+ // (port of klippy/queuelogger.py, with the parts of python 3.13's
+-// logging.handlers.TimedRotatingFileHandler it relies on; sources in ref/)
++// logging.handlers.TimedRotatingFileHandler it relies on; sources in ref/).
++// Rusticc: COSMOS's 0001-Reduce-log-rotate-threshold makes the listener a
++// RotatingFileHandler (5 MiB, 2 backups): SizeRotatingFile.
+ //
+ // Copyright (C) 2016-2019  Kevin O'Connor <kevin@koconnor.net>
+ //
+@@ -8,7 +10,7 @@
+ use crate::logging;
+ use std::collections::BTreeMap;
+ use std::fs::{File, OpenOptions};
+-use std::io::Write;
++use std::io::{Seek, SeekFrom, Write};
+ use std::sync::mpsc;
+ use std::sync::{Arc, Mutex};
+ 
+@@ -192,17 +194,94 @@ impl RotatingFile {
+     }
+ }
+ 
++/// python 3.15 logging.handlers.RotatingFileHandler (mode 'a', no
++/// namer/rotator)
++pub struct SizeRotatingFile {
++    base_filename: String,
++    stream: Option<File>,
++    max_bytes: u64,
++    backup_count: usize,
++}
++
++impl SizeRotatingFile {
++    pub fn new(filename: &str, max_bytes: u64, backup_count: usize) -> std::io::Result<Self> {
++        let base_filename = crate::pyglob::abspath(filename);
++        let stream = Some(Self::open(&base_filename)?);
++        Ok(SizeRotatingFile { base_filename, stream, max_bytes, backup_count })
++    }
++
++    // open(filename, 'a'): positioned at the end, as tell() reports it
++    fn open(path: &str) -> std::io::Result<File> {
++        let mut f = OpenOptions::new().create(true).append(true).open(path)?;
++        f.seek(SeekFrom::End(0))?;
++        Ok(f)
++    }
++
++    /// shouldRollover(record) for the formatted message `msg`
++    fn should_rollover(&mut self, msg: &str) -> bool {
++        if self.stream.is_none() {
++            self.stream = Self::open(&self.base_filename).ok();
++        }
++        if self.max_bytes > 0 {
++            let Some(pos) = self.stream.as_mut().and_then(|f| f.stream_position().ok()) else { return false };
++            // Never rollover an empty file
++            if pos == 0 {
++                return false;
++            }
++            // (len() of the text: characters, not bytes)
++            if pos + msg.chars().count() as u64 + 1 >= self.max_bytes {
++                // Never rollover anything other than regular files
++                let p = std::path::Path::new(&self.base_filename);
++                return !(p.exists() && !p.is_file());
++            }
++        }
++        false
++    }
++
++    /// doRollover()
++    pub fn do_rollover(&mut self) {
++        let exists = |p: &str| std::path::Path::new(p).exists();
++        self.stream = None;
++        if self.backup_count > 0 {
++            for i in (1..self.backup_count).rev() {
++                let sfn = format!("{}.{}", self.base_filename, i);
++                let dfn = format!("{}.{}", self.base_filename, i + 1);
++                if exists(&sfn) {
++                    if exists(&dfn) {
++                        let _ = std::fs::remove_file(&dfn);
++                    }
++                    let _ = std::fs::rename(&sfn, &dfn);
++                }
++            }
++            let dfn = format!("{}.1", self.base_filename);
++            if exists(&dfn) {
++                let _ = std::fs::remove_file(&dfn);
++            }
++            if exists(&self.base_filename) {
++                let _ = std::fs::rename(&self.base_filename, &dfn);
++            }
++        }
++        self.stream = Self::open(&self.base_filename).ok();
++    }
++
++    fn write_line(&mut self, msg: &str) {
++        if let Some(f) = self.stream.as_mut() {
++            let _ = f.write_all(format!("{}
++", msg).as_bytes());
++            let _ = f.flush();
++        }
++    }
++}
++
+ struct Inner {
+-    file: RotatingFile,
++    file: SizeRotatingFile,
+     rollover_info: BTreeMap<String, String>,
+ }
+ 
+ impl Inner {
+     /// QueueListener.doRollover
+     fn do_rollover(&mut self) {
+-        if !self.file.do_rollover() {
+-            return;
+-        }
++        self.file.do_rollover();
+         let mut lines: Vec<String> = self.rollover_info.values().cloned().collect();
+         lines.push(format!("=============== Log rollover at {} ===============", crate::util::asctime_local(now() as f64)));
+         self.emit(&lines.join("\n"));
+@@ -210,7 +289,7 @@ impl Inner {
+ 
+     /// BaseRotatingHandler.emit
+     fn emit(&mut self, msg: &str) {
+-        if self.file.should_rollover() {
++        if self.file.should_rollover(msg) {
+             self.do_rollover();
+         }
+         self.file.write_line(msg);
+@@ -225,9 +304,10 @@ pub struct QueueListener {
+ }
+ 
+ impl QueueListener {
+-    pub fn new(filename: &str, rotate_log_at_restart: bool) -> std::io::Result<Self> {
+-        let when = if rotate_log_at_restart { When::Seconds } else { When::Midnight };
+-        let inner = Arc::new(Mutex::new(Inner { file: RotatingFile::new(filename, when)?, rollover_info: BTreeMap::new() }));
++    /// (rotate_log_at_restart: unused here, as in COSMOS's queuelogger)
++    pub fn new(filename: &str, _rotate_log_at_restart: bool) -> std::io::Result<Self> {
++        let file = SizeRotatingFile::new(filename, 5 * 1024 * 1024, 2)?;
++        let inner = Arc::new(Mutex::new(Inner { file, rollover_info: BTreeMap::new() }));
+         let (tx, rx) = mpsc::channel::<Option<String>>();
+         let i = inner.clone();
+         let thread = std::thread::spawn(move || {
+@@ -316,4 +396,28 @@ mod tests {
+         assert!(names.contains(&"klippy.log.notadate".to_string()));
+         let _ = std::fs::remove_dir_all(&dir);
+     }
++
++    #[test]
++    fn size_rollover() {
++        let dir = std::env::temp_dir().join(format!("kaliru_qls_{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).unwrap();
++        let log = dir.join("klippy.log").to_string_lossy().into_owned();
++        std::fs::write(format!("{}.1", log), "one").unwrap();
++        std::fs::write(format!("{}.2", log), "two").unwrap();
++        let mut f = SizeRotatingFile::new(&log, 11, 2).unwrap();
++        // an empty file never rolls over
++        assert!(!f.should_rollover("0123456789abc"));
++        f.write_line("abcd");
++        // pos 5 + the message and its newline, in characters ("é" is one)
++        assert!(!f.should_rollover("123é"));
++        assert!(f.should_rollover("12345"));
++        f.do_rollover();
++        let read = |n: &str| std::fs::read_to_string(dir.join(n)).unwrap();
++        assert_eq!(read("klippy.log.1"), "abcd
++");
++        assert_eq!(read("klippy.log.2"), "one");
++        assert_eq!(read("klippy.log"), "");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
+ }

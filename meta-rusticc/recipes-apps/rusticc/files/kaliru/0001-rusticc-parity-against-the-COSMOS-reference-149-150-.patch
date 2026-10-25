@@ -1,0 +1,659 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sat, 24 Oct 2026 18:41:23 +0300
+Subject: [PATCH 01/14] rusticc: parity against the COSMOS reference, 149/150
+ identical
+
+- rusticc/tools/ref_setup.sh builds a COSMOS-style reference (~/rk/cosmos_ref:
+  no git, klippy/.version, compiled, c_helper without FP contraction);
+  case_cmp.sh runs the cases against it
+- util.rs get_git_version: Kalico's logic (git describe, else klippy/.version)
+- APP_NAME "Rusticc"
+- python 3.15 tracebacks: ModuleNotFoundError "Did you mean" for kinematics
+  (traceback.py / suggestions.c over importlib's discover order), json.dumps
+  "when serializing ... item ..." notes on gcode_macro variable errors
+- pyliteral: literal_eval builds dicts pair by pair (unhashable key message,
+  repeated keys) and json errors follow the encoder's order; unit test of 33
+  literals against CPython 3.15
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/extras/gcode_macro.rs |   8 +-
+ src/kinematics/mod.rs     |  24 ++++
+ src/printer.rs            |   3 +-
+ src/pyfmt.rs              |  89 +++++++++++++++
+ src/pyliteral.rs          | 235 ++++++++++++++++++++++++++++----------
+ src/toolhead.rs           |   6 +-
+ src/util.rs               | 125 +++++++++++++++++---
+ 7 files changed, 411 insertions(+), 79 deletions(-)
+
+diff --git a/src/extras/gcode_macro.rs b/src/extras/gcode_macro.rs
+index d74b2af..1be8997 100644
+--- a/src/extras/gcode_macro.rs
++++ b/src/extras/gcode_macro.rs
+@@ -461,13 +461,15 @@ impl GCodeMacro {
+         let prefix = "variable_";
+         for option in config.get_prefix_options(prefix)? {
+             let text = config.get(&option, Dflt::Required)?;
+-            match crate::pyliteral::literal_eval_json(&text) {
++            match crate::pyliteral::literal_eval_json_noted(&text) {
+                 Ok(literal) => {
+                     m.variables.borrow_mut().insert(option[prefix.len()..].to_string(), literal);
+                 }
+-                Err((cls, e)) => {
++                Err(((cls, e), notes)) => {
+                     let msg = format!("Option '{}' in section '{}' is not a valid literal: {}", option, config.get_name(), e);
+-                    return Err(KError::config(msg).with_context(KError::Py(cls.to_string(), e.to_string())));
++                    // (the exception's notes print below its message)
++                    let text = notes.iter().fold(e, |t, n| t + "\n" + n);
++                    return Err(KError::config(msg).with_context(KError::Py(cls.to_string(), text)));
+                 }
+             }
+         }
+diff --git a/src/kinematics/mod.rs b/src/kinematics/mod.rs
+index bd02f2e..a0afebd 100644
+--- a/src/kinematics/mod.rs
++++ b/src/kinematics/mod.rs
+@@ -67,6 +67,30 @@ pub trait Kinematics {
+ 
+ pub type LoadKinematics = fn(&Rc<ToolHead>, &ConfigWrapper) -> KResult<Rc<dyn Kinematics>>;
+ 
++/// The module names importlib discovers in klippy/kinematics (FileFinder
++/// discover: directory order, packages and .py/.pyc files, no __pycache__),
++/// the candidates of a ModuleNotFoundError's "Did you mean"
++pub fn discover_modules() -> Vec<String> {
++    let Ok(dir) = std::fs::read_dir(crate::plugins::klippy_dir().join("kinematics")) else { return Vec::new() };
++    let mut names = Vec::new();
++    for entry in dir.flatten() {
++        let name = entry.file_name().to_string_lossy().into_owned();
++        let path = entry.path();
++        if name == "__pycache__" {
++            continue;
++        }
++        if path.is_dir() && !name.contains('.') {
++            names.push(format!("klippy.kinematics.{}", name));
++        }
++        if path.is_file() {
++            if let Some(stem) = name.strip_suffix(".py").or_else(|| name.strip_suffix(".pyc")) {
++                names.push(format!("klippy.kinematics.{}", stem));
++            }
++        }
++    }
++    names
++}
++
+ /// klippy/kinematics/*.py that have load_kinematics(), None where not
+ /// ported yet
+ pub static KINEMATICS: &[(&str, Option<LoadKinematics>)] = &[
+diff --git a/src/printer.rs b/src/printer.rs
+index 4e06c36..e079a46 100644
+--- a/src/printer.rs
++++ b/src/printer.rs
+@@ -26,7 +26,8 @@ use std::any::Any;
+ use std::cell::{Cell, RefCell};
+ use std::rc::Rc;
+ 
+-pub const APP_NAME: &str = "Kalico";
++/// Rusticc: COSMOS sets APP_NAME to its distro name (kalico_2026.02.00.bb)
++pub const APP_NAME: &str = "Rusticc";
+ 
+ pub const MESSAGE_READY: &str = "Printer is ready";
+ 
+diff --git a/src/pyfmt.rs b/src/pyfmt.rs
+index 6a87e6b..cad5b88 100644
+--- a/src/pyfmt.rs
++++ b/src/pyfmt.rs
+@@ -161,6 +161,95 @@ pub fn py_round(x: f64, ndigits: usize) -> f64 {
+     format!("{:.*}", ndigits, x).parse().unwrap_or(x)
+ }
+ 
++const SUGGEST_MOVE_COST: usize = 2;
++const SUGGEST_CASE_COST: usize = 1;
++const SUGGEST_MAX_STRING_SIZE: usize = 40;
++const SUGGEST_MAX_CANDIDATE_ITEMS: usize = 750;
++
++// Python/suggestions.c levenshtein_distance (on the utf-8 bytes)
++fn levenshtein_distance<'a>(mut a: &'a [u8], mut b: &'a [u8], max_cost: usize) -> usize {
++    if a == b {
++        return 0;
++    }
++    while !a.is_empty() && !b.is_empty() && a[0] == b[0] {
++        a = &a[1..];
++        b = &b[1..];
++    }
++    while !a.is_empty() && !b.is_empty() && a[a.len() - 1] == b[b.len() - 1] {
++        a = &a[..a.len() - 1];
++        b = &b[..b.len() - 1];
++    }
++    if a.is_empty() || b.is_empty() {
++        return (a.len() + b.len()) * SUGGEST_MOVE_COST;
++    }
++    if a.len() > SUGGEST_MAX_STRING_SIZE || b.len() > SUGGEST_MAX_STRING_SIZE {
++        return max_cost + 1;
++    }
++    if b.len() < a.len() {
++        std::mem::swap(&mut a, &mut b);
++    }
++    if (b.len() - a.len()) * SUGGEST_MOVE_COST > max_cost {
++        return max_cost + 1;
++    }
++    let cost = |x: u8, y: u8| {
++        if x == y {
++            0
++        } else if x.is_ascii_alphabetic() && y.is_ascii_alphabetic() && x.eq_ignore_ascii_case(&y) {
++            SUGGEST_CASE_COST
++        } else {
++            SUGGEST_MOVE_COST
++        }
++    };
++    let mut buffer: Vec<usize> = (1..=a.len()).map(|i| i * SUGGEST_MOVE_COST).collect();
++    let mut result = 0;
++    for (b_index, &code) in b.iter().enumerate() {
++        result = b_index * SUGGEST_MOVE_COST;
++        let mut distance = result;
++        let mut minimum = usize::MAX;
++        for (index, &ch) in a.iter().enumerate() {
++            let substitute = distance + cost(code, ch);
++            distance = buffer[index];
++            let insert_delete = result.min(distance) + SUGGEST_MOVE_COST;
++            result = insert_delete.min(substitute);
++            buffer[index] = result;
++            minimum = minimum.min(result);
++        }
++        if minimum > max_cost {
++            return max_cost + 1;
++        }
++    }
++    result
++}
++
++/// The "Did you mean" name of a python 3.15 traceback (traceback.py
++/// _compute_suggestion_error via Python/suggestions.c
++/// _Py_CalculateSuggestions): the closest candidate, the first on ties
++pub fn py_suggestion<'a>(candidates: &'a [String], name: &str) -> Option<&'a str> {
++    if candidates.len() >= SUGGEST_MAX_CANDIDATE_ITEMS || name.len() > SUGGEST_MAX_STRING_SIZE {
++        return None;
++    }
++    let mut best: Option<(&str, usize)> = None;
++    for item in candidates {
++        if item == name {
++            continue;
++        }
++        // No more than 1/3 of the involved characters should need changed,
++        // and don't take matches already beaten
++        let mut max_distance = (name.len() + item.len() + 3) * SUGGEST_MOVE_COST / 6;
++        if let Some((_, d)) = best {
++            max_distance = max_distance.min(d - 1);
++        }
++        let d = levenshtein_distance(name.as_bytes(), item.as_bytes(), max_distance);
++        if d > max_distance {
++            continue;
++        }
++        if best.is_none_or(|(_, bd)| d < bd) {
++            best = Some((item, d));
++        }
++    }
++    best.map(|(s, _)| s)
++}
++
+ /// Python's str.isspace() for one char (also the `\s` class of `re`):
+ /// Rust's char::is_whitespace() plus the \x1c-\x1f separators
+ pub fn py_isspace(c: char) -> bool {
+diff --git a/src/pyliteral.rs b/src/pyliteral.rs
+index 5d88642..36aecc6 100644
+--- a/src/pyliteral.rs
++++ b/src/pyliteral.rs
+@@ -819,94 +819,151 @@ fn malformed(n: Option<&Node>) -> LitError {
+     }
+ }
+ 
+-/// a converted value; Err(type name) marks set / bytes / complex values
+-enum Conv {
++/// What ast.literal_eval made: scalars as values, containers kept apart
++/// so json.dumps can be walked like python's encoder (Opaque: a set /
++/// bytes / complex, which json cannot serialize)
++enum Lit {
+     V(Value),
+-    NotJson(&'static str),
++    Opaque(&'static str),
++    List(Vec<Lit>),
++    Tuple(Vec<Lit>),
++    Dict(Vec<(DictKey, Lit)>),
+ }
+ 
+-fn convert_num(n: &Node) -> Result<Conv, LitError> {
++/// A dict key: a value, or a hashable key that is no value (a bytes /
++/// complex, or a tuple holding one: its type name)
++enum DictKey {
++    K(Key),
++    Other(String),
++}
++
++impl Lit {
++    fn type_name(&self) -> String {
++        match self {
++            Lit::V(v) => v.type_name(),
++            Lit::Opaque(t) => t.to_string(),
++            Lit::List(_) => "list".into(),
++            Lit::Tuple(_) => "tuple".into(),
++            Lit::Dict(_) => "dict".into(),
++        }
++    }
++
++    /// hash(self) fails: the type that is not hashable
++    fn unhashable(&self) -> Option<String> {
++        match self {
++            Lit::Opaque("set") | Lit::List(_) | Lit::Dict(_) => Some(self.type_name()),
++            Lit::Tuple(items) => items.iter().find_map(Lit::unhashable),
++            _ => None,
++        }
++    }
++
++    fn as_value(&self) -> Option<Value> {
++        match self {
++            Lit::V(v) => Some(v.clone()),
++            Lit::Tuple(items) => items.iter().map(Lit::as_value).collect::<Option<Vec<_>>>().map(Value::tuple),
++            _ => None,
++        }
++    }
++
++    /// json.dumps(self): the value, else the TypeError message and the
++    /// notes python 3.15's encoder adds on the way out (innermost first)
++    fn to_json(&self) -> Result<Value, (String, Vec<String>)> {
++        let item = |kind: &str, i: String, l: &Lit| {
++            l.to_json().map_err(|(m, mut notes)| {
++                notes.push(format!("when serializing {} item {}", kind, i));
++                (m, notes)
++            })
++        };
++        let key_error = |t: &str| (format!("keys must be str, int, float, bool or None, not {}", t), vec![]);
++        match self {
++            Lit::V(v) => Ok(v.clone()),
++            Lit::Opaque(t) => Err((format!("Object of type {} is not JSON serializable", t), vec![])),
++            Lit::List(items) => {
++                let v = items.iter().enumerate().map(|(i, l)| item("list", i.to_string(), l)).collect::<Result<_, _>>()?;
++                Ok(Value::list(v))
++            }
++            Lit::Tuple(items) => {
++                let v = items.iter().enumerate().map(|(i, l)| item("tuple", i.to_string(), l)).collect::<Result<_, _>>()?;
++                Ok(Value::tuple(v))
++            }
++            Lit::Dict(entries) => {
++                let mut d = IndexMap::new();
++                for (k, l) in entries {
++                    let k = match k {
++                        DictKey::K(k) if matches!(k.0, Value::Tuple(_)) => return Err(key_error("tuple")),
++                        DictKey::K(k) => k,
++                        DictKey::Other(t) => return Err(key_error(t)),
++                    };
++                    d.insert(k.clone(), item("dict", k.0.repr(), l)?);
++                }
++                Ok(Value::dict(d))
++            }
++        }
++    }
++}
++
++fn convert_num(n: &Node) -> Result<Lit, LitError> {
+     match n {
+-        Node::Const(v @ (Value::Int(_) | Value::Float(_)), _) => Ok(Conv::V(v.clone())),
+-        Node::Special("complex", _) => Ok(Conv::NotJson("complex")),
++        Node::Const(v @ (Value::Int(_) | Value::Float(_)), _) => Ok(Lit::V(v.clone())),
++        Node::Special("complex", _) => Ok(Lit::Opaque("complex")),
+         other => Err(malformed(Some(other))),
+     }
+ }
+ 
+-fn convert_signed_num(n: &Node) -> Result<Conv, LitError> {
++fn convert_signed_num(n: &Node) -> Result<Lit, LitError> {
+     if let Node::UnaryOp(op @ ('+' | '-'), operand, _) = n {
+         let v = convert_num(operand)?;
+         return Ok(match (op, v) {
+-            ('-', Conv::V(v)) => Conv::V(v.neg().map_err(|_| malformed(Some(n)))?),
++            ('-', Lit::V(v)) => Lit::V(v.neg().map_err(|_| malformed(Some(n)))?),
+             (_, v) => v,
+         });
+     }
+     convert_num(n)
+ }
+ 
+-fn convert(n: Option<&Node>) -> Result<Conv, LitError> {
++fn convert(n: Option<&Node>) -> Result<Lit, LitError> {
+     let Some(n) = n else { return Err(malformed(None)) };
+-    let seq = |items: &[Node]| -> Result<Result<Vec<Value>, &'static str>, LitError> {
+-        let mut out = vec![];
+-        let mut bad = None;
+-        for i in items {
+-            match convert(Some(i))? {
+-                Conv::V(v) => out.push(v),
+-                Conv::NotJson(t) => bad = bad.or(Some(t)),
+-            }
+-        }
+-        Ok(match bad {
+-            Some(t) => Err(t),
+-            None => Ok(out),
+-        })
+-    };
++    let seq = |items: &[Node]| items.iter().map(|i| convert(Some(i))).collect::<Result<Vec<_>, _>>();
+     match n {
+-        Node::Const(v, _) => Ok(Conv::V(v.clone())),
+-        Node::Special(t, _) => Ok(Conv::NotJson(t)),
+-        Node::Tuple(items, _) => Ok(match seq(items)? {
+-            Ok(v) => Conv::V(Value::tuple(v)),
+-            Err(t) => Conv::NotJson(t),
+-        }),
+-        Node::List(items, _) => Ok(match seq(items)? {
+-            Ok(v) => Conv::V(Value::list(v)),
+-            Err(t) => Conv::NotJson(t),
+-        }),
++        Node::Const(v, _) => Ok(Lit::V(v.clone())),
++        Node::Special(t, _) => Ok(Lit::Opaque(t)),
++        Node::Tuple(items, _) => Ok(Lit::Tuple(seq(items)?)),
++        Node::List(items, _) => Ok(Lit::List(seq(items)?)),
+         Node::Set(items, _) => {
+-            let _ = seq(items)?;
+-            Ok(Conv::NotJson("set"))
++            seq(items)?;
++            Ok(Lit::Opaque("set"))
+         }
+-        Node::SetCall(_) => Ok(Conv::NotJson("set")),
++        Node::SetCall(_) => Ok(Lit::Opaque("set")),
+         Node::Dict(items, _) => {
+-            let mut d = IndexMap::new();
+-            let mut bad = None;
++            // dict(zip(map(_convert, keys), map(_convert, values))): pair by
++            // pair, a repeated key keeps its place and takes the new value
++            let mut entries: Vec<(DictKey, Lit)> = Vec::new();
+             for (k, v) in items {
+                 let k = convert(k.as_ref())?;
+                 let v = convert(Some(v))?;
+-                match (k, v) {
+-                    (Conv::V(k), Conv::V(v)) => {
+-                        if let Value::Tuple(_) = k {
+-                            bad = bad.or(Some("tuple-key"));
+-                        }
+-                        let key = Key::hashable(&k).map_err(|e| ("TypeError", e.msg))?;
+-                        d.insert(key, v);
++                if let Some(t) = k.unhashable() {
++                    return Err(("TypeError", format!("cannot use '{}' as a dict key (unhashable type: '{}')", k.type_name(), t)));
++                }
++                let key = match k.as_value() {
++                    Some(kv) => DictKey::K(Key::hashable(&kv).map_err(|e| ("TypeError", e.msg))?),
++                    None => DictKey::Other(k.type_name()),
++                };
++                if let DictKey::K(key) = &key {
++                    if let Some(e) = entries.iter_mut().find(|(x, _)| matches!(x, DictKey::K(x) if x == key)) {
++                        e.1 = v;
++                        continue;
+                     }
+-                    (Conv::NotJson(t), _) | (_, Conv::NotJson(t)) => bad = bad.or(Some(t)),
+                 }
++                entries.push((key, v));
+             }
+-            Ok(match bad {
+-                Some(t) => Conv::NotJson(t),
+-                None => Conv::V(Value::dict(d)),
+-            })
++            Ok(Lit::Dict(entries))
+         }
+-        Node::BinOp(op @ ('+' | '-'), left, right, _) => {
++        Node::BinOp('+' | '-', left, right, _) => {
+             let l = convert_signed_num(left)?;
+             let r = convert_num(right)?;
+             match (l, r) {
+-                (Conv::V(_), Conv::NotJson("complex")) => Ok(Conv::NotJson("complex")),
+-                _ => {
+-                    let _ = op;
+-                    convert_signed_num(n)
+-                }
++                (Lit::V(_), Lit::Opaque("complex")) => Ok(Lit::Opaque("complex")),
++                _ => convert_signed_num(n),
+             }
+         }
+         _ => convert_signed_num(n),
+@@ -916,6 +973,17 @@ fn convert(n: Option<&Node>) -> Result<Conv, LitError> {
+ /// ast.literal_eval(s) followed by json.dumps(literal) (the gcode_macro
+ /// variable check); Err is (exception class, message)
+ pub fn literal_eval_json(src: &str) -> Result<Value, LitError> {
++    literal_eval_json_noted(src).map_err(|(e, _)| e)
++}
++
++/// literal_eval_json, with the notes json.dumps added to the exception
++/// (traceback lines below the message)
++pub fn literal_eval_json_noted(src: &str) -> Result<Value, (LitError, Vec<String>)> {
++    let lit = literal_eval(src).map_err(|e| (e, vec![]))?;
++    lit.to_json().map_err(|(m, notes)| (("TypeError", m), notes))
++}
++
++fn literal_eval(src: &str) -> Result<Lit, LitError> {
+     let src = src.trim_start_matches([' ', '\t']);
+     let lx = lex(src)?;
+     let mut toks = lx.toks;
+@@ -951,9 +1019,56 @@ pub fn literal_eval_json(src: &str) -> Result<Value, LitError> {
+     if !matches!(p.peek(), Tok::End) {
+         return p.fail();
+     }
+-    match convert(Some(&node))? {
+-        Conv::V(v) => Ok(v),
+-        Conv::NotJson("tuple-key") => Err(("TypeError", "keys must be str, int, float, bool or None, not tuple".into())),
+-        Conv::NotJson(t) => Err(("TypeError", format!("Object of type {} is not JSON serializable", t))),
++    convert(Some(&node))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// ast.literal_eval + json.dumps errors and notes, as CPython 3.15 gives them
++    #[test]
++    fn json_notes() {
++        let cases: &[(&str, Option<(&str, &str, &[&str])>)] = &[
++            ("{1:{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item 1"]))),
++            ("[1,{\"a\":(1,{3})}]", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing tuple item 1", "when serializing dict item 'a'", "when serializing list item 1"]))),
++            ("{(1,2):3}", Some(("TypeError", "keys must be str, int, float, bool or None, not tuple", &[]))),
++            ("{1:{(1,2):3}}", Some(("TypeError", "keys must be str, int, float, bool or None, not tuple", &["when serializing dict item 1"]))),
++            ("({2},)", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing tuple item 0"]))),
++            ("[{2},{3j}]", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing list item 0"]))),
++            ("{2:3j}", Some(("TypeError", "Object of type complex is not JSON serializable", &["when serializing dict item 2"]))),
++            ("{\"a\":1, \"b\":{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item 'b'"]))),
++            ("b\"x\"", Some(("TypeError", "Object of type bytes is not JSON serializable", &[]))),
++            ("[b\"x\"]", Some(("TypeError", "Object of type bytes is not JSON serializable", &["when serializing list item 0"]))),
++            ("{1:2, (1,2):{3}}", Some(("TypeError", "keys must be str, int, float, bool or None, not tuple", &[]))),
++            ("{1:{2}, 1:3}", None),
++            ("{1:{2}, 1.0:3}", None),
++            ("{{1}:2}", Some(("TypeError", "cannot use 'set' as a dict key (unhashable type: 'set')", &[]))),
++            ("{[1]:2}", Some(("TypeError", "cannot use 'list' as a dict key (unhashable type: 'list')", &[]))),
++            ("{(1,[2]):3}", Some(("TypeError", "cannot use 'tuple' as a dict key (unhashable type: 'list')", &[]))),
++            ("{(1,{2}):3}", Some(("TypeError", "cannot use 'tuple' as a dict key (unhashable type: 'set')", &[]))),
++            ("{b\"x\":1}", Some(("TypeError", "keys must be str, int, float, bool or None, not bytes", &[]))),
++            ("{1j:1}", Some(("TypeError", "keys must be str, int, float, bool or None, not complex", &[]))),
++            ("{(1,b\"x\"):1}", Some(("TypeError", "keys must be str, int, float, bool or None, not tuple", &[]))),
++            ("{(1,2):{3}}", Some(("TypeError", "keys must be str, int, float, bool or None, not tuple", &[]))),
++            ("{\"a\":{1:{2}}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item 1", "when serializing dict item 'a'"]))),
++            ("[1, 2, 3j]", Some(("TypeError", "Object of type complex is not JSON serializable", &["when serializing list item 2"]))),
++            ("1+2j", Some(("TypeError", "Object of type complex is not JSON serializable", &[]))),
++            ("{True:{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item True"]))),
++            ("{None:{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item None"]))),
++            ("{1.5:{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item 1.5"]))),
++            ("{\"a'b\":{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item \"a'b\""]))),
++            ("{1:[2,(3,{4})]}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing tuple item 1", "when serializing list item 1", "when serializing dict item 1"]))),
++            ("{1:2, {1}:3}", Some(("TypeError", "cannot use 'set' as a dict key (unhashable type: 'set')", &[]))),
++            ("{{1}:{2}}", Some(("TypeError", "cannot use 'set' as a dict key (unhashable type: 'set')", &[]))),
++            ("set()", Some(("TypeError", "Object of type set is not JSON serializable", &[]))),
++            ("[set()]", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing list item 0"]))),
++        ];
++        for (src, want) in cases {
++            let got = literal_eval_json_noted(src).err();
++            let got = got.as_ref().map(|((c, m), n)| (*c, m.as_str(), n.iter().map(String::as_str).collect::<Vec<_>>()));
++            let want = want.map(|(c, m, n)| (c, m, n.to_vec()));
++            assert_eq!(got, want, "{}", src);
++        }
+     }
+ }
+diff --git a/src/toolhead.rs b/src/toolhead.rs
+index 5555f2e..1c3c47e 100644
+--- a/src/toolhead.rs
++++ b/src/toolhead.rs
+@@ -401,7 +401,11 @@ impl ToolHead {
+                     // ModuleNotFoundError from importlib (of the first missing
+                     // dotted component)
+                     let module = format!("klippy.kinematics.{}", kin_name.split('.').next().unwrap_or(""));
+-                    let cause = KError::Py("ModuleNotFoundError".into(), format!("No module named {}", crate::pyfmt::py_str_repr(&module)));
++                    let mut text = format!("No module named {}", crate::pyfmt::py_str_repr(&module));
++                    if let Some(s) = crate::pyfmt::py_suggestion(&kinematics::discover_modules(), &module) {
++                        text += &format!(". Did you mean: '{}'?", s);
++                    }
++                    let cause = KError::Py("ModuleNotFoundError".into(), text);
+                     let msg = format!("Error loading kinematics '{}'", kin_name);
+                     logging::exception_err(&msg, &cause);
+                     return Err(KError::config(msg).with_context(cause));
+diff --git a/src/util.rs b/src/util.rs
+index eb549c8..e5895ee 100644
+--- a/src/util.rs
++++ b/src/util.rs
+@@ -4,10 +4,10 @@
+ //
+ // This file may be distributed under the terms of the GNU GPLv3 license.
+ //
+-// Deliberate differences (no python source tree next to the binary):
+-// - get_git_version() reports KALICO_VERSION, the Kalico commit this port
+-//   tracks (like Moonruster reports the Moonraker version it tracks);
+-//   branch / remote / url are "?"
++// Rusticc: get_git_version() runs git in the install directory as Kalico
++// does, then reads klippy/.version (the klippy directory is
++// plugins::klippy_dir()).
++// Deliberate difference (no python source tree next to the binary):
+ // - dump_mcu_build() looks for the mcu build files one directory above the
+ //   binary (python: one directory above klippy/, the source tree root)
+ use crate::logging;
+@@ -15,9 +15,6 @@ use crate::pyfmt::py_strip;
+ use std::ffi::CString;
+ use std::os::fd::RawFd;
+ 
+-/// `git describe` of the Kalico commit this port tracks (5b59427)
+-pub const KALICO_VERSION: &str = "v2026.10.00-155-g5b594279";
+-
+ // Return the SIGINT interrupt handler back to the OS default
+ pub fn fix_sigint() {
+     unsafe { libc::signal(libc::SIGINT, libc::SIG_DFL) };
+@@ -171,13 +168,113 @@ pub struct GitInfo {
+     pub url: String,
+ }
+ 
+-/// get_git_version(): see the module comment
++/// Rusticc: get_git_version(from_file=True) as Kalico runs it from an
++/// install directory (COSMOS: /usr/share/klipper, no git repository): git
++/// describe in klippy/.., else klippy/.version ("Release - <version>")
+ pub fn get_git_version() -> GitInfo {
+-    GitInfo {
+-        version: KALICO_VERSION.into(),
+-        file_status: vec![],
+-        branch: "?".into(),
+-        remote: "?".into(),
+-        url: "?".into(),
++    let klippy_src = crate::plugins::klippy_dir();
++    let gitdir = klippy_src.join("..").to_string_lossy().into_owned();
++    let mut info = GitInfo { version: "?".into(), file_status: vec![], branch: "?".into(), remote: "?".into(), url: "?".into() };
++    match git(&gitdir, &["describe", "--always", "--tags", "--long", "--dirty"]) {
++        Ok((0, ver, _)) => {
++            info.version = bytes_strip(&ver);
++            match git(&gitdir, &["status", "--porcelain", "--ignored"]) {
++                Ok((0, stat, _)) => {
++                    info.file_status = bytes_strip(&stat).split('\n').map(|l| py_split_maxsplit1(l)).collect();
++                }
++                Ok((_, _, err)) => logging::debug(&format!("Error getting git status: {}", crate::pyfmt::py_bytes_repr(&err))),
++                Err(e) => logging::debug(&format!("Exception on run: {}", e)),
++            }
++            get_repo_info(&gitdir, &mut info);
++            return info;
++        }
++        Ok((_, _, err)) => logging::debug(&format!("Error getting git version: {}", crate::pyfmt::py_bytes_repr(&err))),
++        Err(e) => logging::debug(&format!("Exception on run: {}", e)),
++    }
++    info.version = get_version_from_file(&klippy_src);
++    info
++}
++
++/// get_version_from_file(klippy_src)
++pub fn get_version_from_file(klippy_src: &std::path::Path) -> String {
++    match std::fs::read_to_string(klippy_src.join(".version")) {
++        Ok(s) => s.trim_end().to_string(),
++        Err(_) => "?".into(),
++    }
++}
++
++/// subprocess.Popen(("git", "-C", gitdir, ...)): (returncode, stdout,
++/// stderr), or the traceback.format_exc() text when git cannot run
++fn git(gitdir: &str, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), String> {
++    match std::process::Command::new("git").arg("-C").arg(gitdir).args(args).output() {
++        Ok(o) => Ok((o.status.code().unwrap_or(-1), o.stdout, o.stderr)),
++        Err(e) => Err(format!(
++            "Traceback (most recent call last):\n  File \"<kaliru>\"\n{}: {}\n",
++            crate::pyfmt::py_oserror_class(&e),
++            crate::pyfmt::py_oserror(&e, "git")
++        )),
++    }
++}
++
++/// str(b.strip().decode())
++fn bytes_strip(b: &[u8]) -> String {
++    py_strip(&String::from_utf8_lossy(b)).to_string()
++}
++
++/// str.split(None, 1)
++fn py_split_maxsplit1(l: &str) -> Vec<String> {
++    let t = l.trim_start();
++    if t.is_empty() {
++        return vec![];
++    }
++    match t.find(char::is_whitespace) {
++        Some(i) => vec![t[..i].to_string(), t[i..].trim_start().to_string()],
++        None => vec![t.to_string()],
++    }
++}
++
++/// _get_repo_info(gitdir)
++fn get_repo_info(gitdir: &str, info: &mut GitInfo) {
++    let res = (|| -> Result<(), String> {
++        let (rc, branch_list, err) = git(gitdir, &["branch", "--no-color"])?;
++        if rc != 0 {
++            logging::debug(&format!("Error running git branch: {}", crate::pyfmt::py_bytes_repr(&err)));
++            return Ok(());
++        }
++        let text = bytes_strip(&branch_list);
++        match text.split('\n').find(|l| l.starts_with('*')) {
++            Some(l) => info.branch = py_strip(&l[1..]).to_string(),
++            None => {
++                logging::debug(&format!("Unable to find current branch:\n{}", crate::pyfmt::py_bytes_repr(&branch_list)));
++                return Ok(());
++            }
++        }
++        if info.branch.starts_with("(HEAD detached") {
++            let inner = info.branch.trim_matches(|c| c == '(' || c == ')');
++            let last = inner.split_whitespace().last().unwrap_or("");
++            let parts: Vec<&str> = last.splitn(2, '/').collect();
++            if parts.len() != 2 {
++                return Ok(());
++            }
++            info.remote = parts[0].to_string();
++        } else {
++            let key = format!("branch.{}.remote", info.branch);
++            let (rc, remote, err) = git(gitdir, &["config", "--get", &key])?;
++            if rc != 0 {
++                logging::debug(&format!("Error running git config: {}", crate::pyfmt::py_bytes_repr(&err)));
++                return Ok(());
++            }
++            info.remote = bytes_strip(&remote);
++        }
++        let (rc, url, err) = git(gitdir, &["remote", "get-url", &info.remote.clone()])?;
++        if rc != 0 {
++            logging::debug(&format!("Error running git remote get-url: {}", crate::pyfmt::py_bytes_repr(&err)));
++            return Ok(());
++        }
++        info.url = bytes_strip(&url);
++        Ok(())
++    })();
++    if let Err(tb) = res {
++        logging::debug(&format!("Error fetching repo info: {}", tb));
+     }
+ }

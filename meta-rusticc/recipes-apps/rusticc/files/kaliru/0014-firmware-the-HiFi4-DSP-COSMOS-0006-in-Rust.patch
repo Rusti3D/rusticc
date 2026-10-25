@@ -1,0 +1,3313 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sun, 25 Oct 2026 03:32:54 +0200
+Subject: [PATCH 14/14] firmware: the HiFi4 DSP (COSMOS 0006) in Rust
+
+The CC1's mainboard MCU: src/hifi4 (the board, RPMsg over the msgbox, the
+resource table, the trace log, startup and vectors as global_asm!) and
+src/hifi4/lib (the lib/hifi4 drivers it calls: hal_core, ccu, gpio, gpadc,
+msgbox, watchdog).
+
+- targets/xtensa-hifi4-none-elf.json: Espressif's xtensa LLVM (toolchain
+  esp), the call0 ABI, the core options COSMOS's gcc uses; links with
+  COSMOS's Zephyr gcc and its linker script (build/hifi4.ld, literals
+  before code)
+- build: the hifi4 sources; requests in source order (the C build is -O0)
+- configs/cosmos-cc1-dsp (config.mainboard): requests + dictionary
+  identical to the C build, whose dictionary equals the printer's; the
+  resource table is byte-identical; ctr_check 72/72 on all configs
+- rusticc/deploy/dsp-test.sh + mcu_identify.py: load it on the printer by
+  hand from /user-resource/rusticc and read its dictionary (not run yet)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
+---
+ firmware/build/hifi4.ld                       | 145 +++++++
+ firmware/build/main.rs                        |  33 +-
+ firmware/configs/cosmos-cc1-dsp/autoconf.h    | 393 ++++++++++++++++++
+ firmware/configs/cosmos-cc1-dsp/config        |  79 ++++
+ firmware/configs/cosmos-cc1-dsp/defconfig     |  12 +
+ firmware/src/generic/mod.rs                   |   2 +-
+ firmware/src/hifi4/com.rs                     | 134 ++++++
+ firmware/src/hifi4/gpio.rs                    | 106 +++++
+ firmware/src/hifi4/gpio_h.rs                  |  47 +++
+ firmware/src/hifi4/irq.rs                     |  48 +++
+ firmware/src/hifi4/lib/ccu.rs                 |  36 ++
+ firmware/src/hifi4/lib/gpadc.rs               | 111 +++++
+ firmware/src/hifi4/lib/gpio.rs                | 117 ++++++
+ firmware/src/hifi4/lib/hal_core.rs            | 224 ++++++++++
+ firmware/src/hifi4/lib/mod.rs                 |  56 +++
+ firmware/src/hifi4/lib/msgbox.rs              | 130 ++++++
+ firmware/src/hifi4/lib/watchdog.rs            |  80 ++++
+ firmware/src/hifi4/log.rs                     |  62 +++
+ firmware/src/hifi4/main.rs                    |  29 ++
+ firmware/src/hifi4/mod.rs                     |  37 ++
+ firmware/src/hifi4/resource_table.rs          |  99 +++++
+ firmware/src/hifi4/rpmsg.rs                   | 325 +++++++++++++++
+ firmware/src/hifi4/rpmsg_transport.rs         |  73 ++++
+ firmware/src/hifi4/startup.rs                 | 352 ++++++++++++++++
+ firmware/src/hifi4/timer.rs                   |  73 ++++
+ firmware/src/hifi4/watchdog.rs                |  33 ++
+ firmware/src/main.rs                          |   8 +-
+ firmware/targets/xtensa-hifi4-none-elf.json   |  22 +
+ firmware/tests/ctr_check.sh                   |   6 +
+ .../cosmos-cc1-dsp_compile_time_request.txt   | 126 ++++++
+ .../tests/ref/cosmos-cc1-dsp_klipper.dict     |   1 +
+ 31 files changed, 2995 insertions(+), 4 deletions(-)
+ create mode 100644 firmware/build/hifi4.ld
+ create mode 100644 firmware/configs/cosmos-cc1-dsp/autoconf.h
+ create mode 100644 firmware/configs/cosmos-cc1-dsp/config
+ create mode 100644 firmware/configs/cosmos-cc1-dsp/defconfig
+ create mode 100644 firmware/src/hifi4/com.rs
+ create mode 100644 firmware/src/hifi4/gpio.rs
+ create mode 100644 firmware/src/hifi4/gpio_h.rs
+ create mode 100644 firmware/src/hifi4/irq.rs
+ create mode 100644 firmware/src/hifi4/lib/ccu.rs
+ create mode 100644 firmware/src/hifi4/lib/gpadc.rs
+ create mode 100644 firmware/src/hifi4/lib/gpio.rs
+ create mode 100644 firmware/src/hifi4/lib/hal_core.rs
+ create mode 100644 firmware/src/hifi4/lib/mod.rs
+ create mode 100644 firmware/src/hifi4/lib/msgbox.rs
+ create mode 100644 firmware/src/hifi4/lib/watchdog.rs
+ create mode 100644 firmware/src/hifi4/log.rs
+ create mode 100644 firmware/src/hifi4/main.rs
+ create mode 100644 firmware/src/hifi4/mod.rs
+ create mode 100644 firmware/src/hifi4/resource_table.rs
+ create mode 100644 firmware/src/hifi4/rpmsg.rs
+ create mode 100644 firmware/src/hifi4/rpmsg_transport.rs
+ create mode 100644 firmware/src/hifi4/startup.rs
+ create mode 100644 firmware/src/hifi4/timer.rs
+ create mode 100644 firmware/src/hifi4/watchdog.rs
+ create mode 100644 firmware/targets/xtensa-hifi4-none-elf.json
+ create mode 100644 firmware/tests/ref/cosmos-cc1-dsp_compile_time_request.txt
+ create mode 100644 firmware/tests/ref/cosmos-cc1-dsp_klipper.dict
+
+diff --git a/firmware/build/hifi4.ld b/firmware/build/hifi4.ld
+new file mode 100644
+index 0000000..caf386e
+--- /dev/null
++++ b/firmware/build/hifi4.ld
+@@ -0,0 +1,145 @@
++/* src/hifi4/hifi4.ld of COSMOS (0006-Add-support-for-hifi4) */
++ENTRY(_ResetVector)
++
++MEMORY
++{
++    iram0 (rx)      : ORIGIN = 0x00400000, LENGTH = 0x00010000
++    dram0 (rw)      : ORIGIN = 0x00420000, LENGTH = 0x00008000
++    dram1 (rw)      : ORIGIN = 0x00440000, LENGTH = 0x00008000
++    sram_trace (rw) : ORIGIN = 0x00027000, LENGTH = 0x00001000
++}
++
++PHDRS
++{
++    iram0_phdr PT_LOAD;
++    rodata_phdr PT_LOAD;
++    dram0_phdr PT_LOAD;
++    dram1_phdr PT_LOAD;
++}
++
++PROVIDE(_memmap_reset_vector = 0x00400660);
++PROVIDE(_memmap_vecbase_reset = 0x00401000);
++
++SECTIONS
++{
++    .resource_table : ALIGN(4) {
++        KEEP(*(.resource_table))
++    } > iram0 :iram0_phdr
++
++    .trace_buf (NOLOAD) : ALIGN(4)
++    {
++        _trace_buf_start = .;
++        KEEP(*(.trace_buf))
++        _trace_buf_end = .;
++    } > sram_trace :NONE
++
++    ._xt_int_enter.literal : ALIGN(4) {
++        *(._xt_int_enter.literal)
++    } > iram0 :iram0_phdr
++
++    .text._xt_int_enter : ALIGN(4) {
++        KEEP(*(.text._xt_int_enter))
++    } > iram0 :iram0_phdr
++    
++    .ResetVector.literal : ALIGN(4) {
++        *(.ResetVector.literal)
++    } > iram0 :iram0_phdr
++    
++    .ResetVector.text 0x00400660 : ALIGN(4) {
++        *(.ResetVector.text)
++    } > iram0 :iram0_phdr
++    
++    /* Interrupt vectors at vecbase + offsets */
++    .Level2InterruptVector.text 0x0040117C : ALIGN(4) {
++        KEEP(*(.Level2InterruptVector.text))
++    } > iram0 :iram0_phdr
++    
++    .Level3InterruptVector.text 0x0040119C : ALIGN(4) {
++        KEEP(*(.Level3InterruptVector.text))
++    } > iram0 :iram0_phdr
++    
++    .DebugExceptionVector.text 0x004011BC : ALIGN(4) {
++        KEEP(*(.DebugExceptionVector.text))
++    } > iram0 :iram0_phdr
++    
++    .NMIExceptionVector.text 0x004011DC : ALIGN(4) {
++        KEEP(*(.NMIExceptionVector.text))
++    } > iram0 :iram0_phdr
++    
++    .KernelExceptionVector.text 0x004011FC : ALIGN(4) {
++        KEEP(*(.KernelExceptionVector.text))
++    } > iram0 :iram0_phdr
++    
++    .UserExceptionVector.text 0x0040121C : ALIGN(4) {
++        KEEP(*(.UserExceptionVector.text))
++    } > iram0 :iram0_phdr
++    
++    .DoubleExceptionVector.text 0x0040123C : ALIGN(4) {
++        KEEP(*(.DoubleExceptionVector.text))
++    } > iram0 :iram0_phdr
++    
++    .text 0x00404000 : ALIGN(4) {
++        /* (all the literals before the code: an l32r loads from below) */
++        *(.literal .literal.*)
++        *(.text .text.*)
++        *(.stub)
++        *(.gnu.linkonce.literal.* .gnu.linkonce.t.*)
++        *(.fini.literal)
++        *(.fini)
++        *(.gnu.version)
++    } > iram0 :iram0_phdr
++    
++    .rodata : ALIGN(4) {
++        _rodata_start = ABSOLUTE(.);
++        *(.rodata .rodata.*)
++        *(.gnu.linkonce.r.*)
++        *(.rodata1)
++        . = ALIGN(4);
++        _rodata_end = ABSOLUTE(.);
++    } > dram0 AT > iram0 :rodata_phdr
++
++    _rodata_lma = LOADADDR(.rodata);
++    
++    .data : ALIGN(4) {
++        _data_start = ABSOLUTE(.);
++        *(.data .data.*)
++        *(.gnu.linkonce.d.*)
++        *(.data1)
++        *(.sdata .sdata.* .sdata2.*)
++        *(.gnu.linkonce.s.*)
++        . = ALIGN(4);
++        _data_end = ABSOLUTE(.);
++    } > dram0 AT > iram0 :rodata_phdr
++
++    _data_lma = LOADADDR(.data);
++    
++    .bss (NOLOAD) : ALIGN(4) {
++        _bss_start = ABSOLUTE(.);
++        *(.dynsbss)
++        *(.sbss .sbss.* .scommon)
++        *(.dynbss)
++        *(.bss .bss.*)
++        *(.gnu.linkonce.b.*)
++        *(COMMON)
++        . = ALIGN(4);
++        _bss_end = ABSOLUTE(.);
++    } > dram0 :NONE
++    
++    /* Heap section - place after BSS */
++    .heap (NOLOAD) : ALIGN(8) {
++        _heap_start = ABSOLUTE(.);
++        . = . + 0x2000;  /* 8KB heap */
++        _heap_end = ABSOLUTE(.);
++    } > dram1 :NONE
++
++    /* Reserve space for stack in DRAM1, after the heap */
++    .stack (NOLOAD) : ALIGN(16) {
++        . = . + 0x1000;  /* 4 KB stack */
++        _stack_end = ABSOLUTE(.);
++    } > dram1 :NONE
++    
++    /* Update stack pointer to point to END of stack section */
++    PROVIDE(__stack = _stack_end);
++    
++    _end = .;
++}
+diff --git a/firmware/build/main.rs b/firmware/build/main.rs
+index e4a75e3..d44cd91 100644
+--- a/firmware/build/main.rs
++++ b/firmware/build/main.rs
+@@ -329,6 +329,22 @@ fn sources(config: &kconfig::Config) -> Vec<&'static str> {
+                 out.extend(*files);
+             }
+         }
++    } else if on("CONFIG_MACH_HIFI4") {
++        // src/hifi4/Makefile (COSMOS; the lib/hifi4 driver files: no
++        // requests, scanned first for the constants gpio.rs names)
++        out.extend(["hifi4/lib/mod.rs", "hifi4/lib/gpadc.rs"]);
++        out.extend(["hifi4/log.rs", "hifi4/main.rs", "hifi4/gpio.rs", "hifi4/irq.rs"]);
++        if on("CONFIG_SERIAL") {
++            panic!("the hifi4 uart (lib/hifi4/uart.c) is not ported: COSMOS uses the msgbox");
++        }
++        if on("CONFIG_HIFI4_MSGBOX") {
++            out.extend(["hifi4/resource_table.rs", "hifi4/rpmsg_transport.rs", "hifi4/com.rs", "hifi4/rpmsg.rs"]);
++        }
++        if on("CONFIG_HIFI4_WATCHDOG") {
++            out.push("hifi4/watchdog.rs");
++        }
++        out.extend(["hifi4/timer.rs", "hifi4/startup.rs"]);
++        out.extend(["generic/timer_irq.rs", "generic/crc16_ccitt.rs"]);
+     } else if on("CONFIG_MACH_SIMU") {
+         // src/simulator/Makefile
+         out.extend(["simulator/main.rs", "simulator/gpio.rs", "simulator/timer.rs", "simulator/serial.rs"]);
+@@ -571,6 +587,14 @@ fn main() {
+         println!("cargo:rustc-link-arg=--entry=_text_vectortable_start");
+     }
+ 
++    // hifi4: COSMOS's linker script (the call0 ABI, no C runtime)
++    if config.enabled("CONFIG_MACH_HIFI4") {
++        std::fs::copy(root.join("build/hifi4.ld"), out.join("hifi4.ld")).unwrap();
++        println!("cargo:rustc-link-arg=-T{}", out.join("hifi4.ld").display());
++        println!("cargo:rustc-link-arg=-nostartfiles");
++        println!("cargo:rustc-link-arg=-Wl,--abi-call0");
++    }
++
+     // scan: per file, the requests come out in reverse source order (as
+     // gcc emits a file's .compile_time_request section)
+     let src = root.join("src");
+@@ -588,9 +612,14 @@ fn main() {
+         scanned.push((*f, s));
+     }
+     let mut requests = vec![];
+-    for (f, s) in scanned {
++    // (hifi4: COSMOS builds it at -O0, where gcc emits them in source order)
++    let source_order = config.enabled("CONFIG_MACH_HIFI4");
++    for (f, mut s) in scanned {
+         let module = module_path(f);
+-        for decl in s.decls.into_iter().rev() {
++        if !source_order {
++            s.decls.reverse();
++        }
++        for decl in s.decls {
+             requests.push(commands::Request { decl, module: module.clone() });
+         }
+     }
+diff --git a/firmware/configs/cosmos-cc1-dsp/autoconf.h b/firmware/configs/cosmos-cc1-dsp/autoconf.h
+new file mode 100644
+index 0000000..5dbb131
+--- /dev/null
++++ b/firmware/configs/cosmos-cc1-dsp/autoconf.h
+@@ -0,0 +1,393 @@
++#define CONFIG_LOW_LEVEL_OPTIONS 1
++#define CONFIG_MACH_AVR 0
++#define CONFIG_MACH_ATSAM 0
++#define CONFIG_MACH_ATSAMD 0
++#define CONFIG_MACH_LPC176X 0
++#define CONFIG_MACH_STM32 0
++#define CONFIG_MACH_HC32F460 0
++#define CONFIG_MACH_RPXXXX 0
++#define CONFIG_MACH_PRU 0
++#define CONFIG_MACH_AR100 0
++#define CONFIG_MACH_HIFI4 1
++#define CONFIG_MACH_LINUX 0
++#define CONFIG_MACH_SIMU 0
++#define CONFIG_AVR_SELECT 0
++#define CONFIG_BOARD_DIRECTORY "hifi4"
++#define CONFIG_MACH_atmega2560 0
++#define CONFIG_MACH_atmega1280 0
++#define CONFIG_MACH_at90usb1286 0
++#define CONFIG_MACH_at90usb646 0
++#define CONFIG_MACH_atmega32u4 0
++#define CONFIG_MACH_atmega1284p 0
++#define CONFIG_MACH_atmega644p 0
++#define CONFIG_MACH_atmega328p 0
++#define CONFIG_MACH_atmega328 0
++#define CONFIG_MACH_atmega168 0
++#define CONFIG_MCU ""
++#define CONFIG_AVRDUDE_PROTOCOL ""
++#define CONFIG_AVR_FREQ_16000000 0
++#define CONFIG_AVR_FREQ_20000000 0
++#define CONFIG_AVR_FREQ_8000000 0
++#define CONFIG_CLOCK_FREQ 600000000
++#define CONFIG_CLEAR_PRESCALER 0
++#define CONFIG_AVR_CLKPR 0
++#define CONFIG_AVR_STACK_SIZE 0
++#define CONFIG_AVR_WATCHDOG 0
++#define CONFIG_USBSERIAL 0
++#define CONFIG_SERIAL 0
++#define CONFIG_AVR_USB 0
++#define CONFIG_AVR_SERIAL_UART0 0
++#define CONFIG_AVR_SERIAL_UART1 0
++#define CONFIG_AVR_SERIAL_UART2 0
++#define CONFIG_AVR_SERIAL_UART3 0
++#define CONFIG_SERIAL_BAUD_U2X 0
++#define CONFIG_SERIAL_PORT 0
++#define CONFIG_SIMULAVR 0
++#define CONFIG_ATSAM_SELECT 0
++#define CONFIG_MACH_SAM3X8E 0
++#define CONFIG_MACH_SAM3X8C 0
++#define CONFIG_MACH_SAM4S8C 0
++#define CONFIG_MACH_SAM4E8E 0
++#define CONFIG_MACH_SAME70Q20B 0
++#define CONFIG_MACH_SAM3X 0
++#define CONFIG_MACH_SAM4 0
++#define CONFIG_MACH_SAM4S 0
++#define CONFIG_MACH_SAM4E 0
++#define CONFIG_MACH_SAME70 0
++#define CONFIG_HAVE_SAM_CANBUS 0
++#define CONFIG_FLASH_SIZE 0x
++#define CONFIG_FLASH_BOOT_ADDRESS 0x
++#define CONFIG_RAM_START 0x
++#define CONFIG_RAM_SIZE 0x
++#define CONFIG_STACK_SIZE 0
++#define CONFIG_FLASH_APPLICATION_ADDRESS 0x
++#define CONFIG_ARMCM_ITCM_FLASH_MIRROR_START 0x
++#define CONFIG_ARMCM_DTCM_START 0x
++#define CONFIG_ARMCM_DTCM_SIZE 0x
++#define CONFIG_ATSAM_USB 0
++#define CONFIG_ATSAM_SERIAL 0
++#define CONFIG_ATSAM_MMENU_CANBUS_PC12_PD12 0
++#define CONFIG_ATSAM_MMENU_CANBUS_PB3_PB2 0
++#define CONFIG_ATSAM_USBCANBUS 0
++#define CONFIG_ATSAM_CMENU_CANBUS_PC12_PD12 0
++#define CONFIG_ATSAM_CMENU_CANBUS_PB3_PB2 0
++#define CONFIG_ATSAM_CANBUS_PC12_PD12 0
++#define CONFIG_ATSAM_CANBUS_PB3_PB2 0
++#define CONFIG_ATSAMD_SELECT 0
++#define CONFIG_HAVE_SERCOM 0
++#define CONFIG_MACH_SAMC21G18 0
++#define CONFIG_MACH_SAMD21G18 0
++#define CONFIG_MACH_SAMD21E18 0
++#define CONFIG_MACH_SAMD21J18 0
++#define CONFIG_MACH_SAMD21E15 0
++#define CONFIG_MACH_SAMD51G19 0
++#define CONFIG_MACH_SAMD51J19 0
++#define CONFIG_MACH_SAMD51N19 0
++#define CONFIG_MACH_SAMD51P20 0
++#define CONFIG_MACH_SAME51G19 0
++#define CONFIG_MACH_SAME51J19 0
++#define CONFIG_MACH_SAME51N19 0
++#define CONFIG_MACH_SAME54P20 0
++#define CONFIG_MACH_SAMX2 0
++#define CONFIG_MACH_SAMC21 0
++#define CONFIG_MACH_SAMD21 0
++#define CONFIG_MACH_SAMX5 0
++#define CONFIG_MACH_SAMD51 0
++#define CONFIG_MACH_SAME51 0
++#define CONFIG_MACH_SAME54 0
++#define CONFIG_HAVE_SAMD_CANBUS 0
++#define CONFIG_HAVE_SAMD_USB 0
++#define CONFIG_SAMD_FLASH_START_2000 0
++#define CONFIG_SAMD_FLASH_START_4000 0
++#define CONFIG_SAMD_FLASH_START_0000 0
++#define CONFIG_SAMD21_BOOTLOADER_SAMBA 0
++#define CONFIG_SAMD21_BOOTLOADER_UF2 0
++#define CONFIG_CLOCK_REF_X32K 0
++#define CONFIG_CLOCK_REF_X12M 0
++#define CONFIG_CLOCK_REF_X25M 0
++#define CONFIG_CLOCK_REF_X25M_XOSC0 0
++#define CONFIG_CLOCK_REF_INTERNAL 0
++#define CONFIG_SAMD51_FREQ_120 0
++#define CONFIG_SAMD51_FREQ_150 0
++#define CONFIG_SAMD51_FREQ_180 0
++#define CONFIG_SAMD51_FREQ_200 0
++#define CONFIG_ATSAMD_USB 0
++#define CONFIG_ATSAMD_SERIAL 0
++#define CONFIG_ATSAMD_MMENU_CANBUS_PA23_PA22 0
++#define CONFIG_ATSAMD_MMENU_CANBUS_PA25_PA24 0
++#define CONFIG_ATSAMD_MMENU_CANBUS_PB11_PB10 0
++#define CONFIG_ATSAMD_MMENU_CANBUS_PB13_PB12 0
++#define CONFIG_ATSAMD_MMENU_CANBUS_PB15_PB14 0
++#define CONFIG_ATSAMD_USBCANBUS 0
++#define CONFIG_ATSAMD_CMENU_CANBUS_PA23_PA22 0
++#define CONFIG_ATSAMD_CMENU_CANBUS_PB13_PB12 0
++#define CONFIG_ATSAMD_CMENU_CANBUS_PB15_PB14 0
++#define CONFIG_ATSAMD_CANBUS_PA23_PA22 0
++#define CONFIG_ATSAMD_CANBUS_PA25_PA24 0
++#define CONFIG_ATSAMD_CANBUS_PB11_PB10 0
++#define CONFIG_ATSAMD_CANBUS_PB13_PB12 0
++#define CONFIG_ATSAMD_CANBUS_PB15_PB14 0
++#define CONFIG_LPC_SELECT 0
++#define CONFIG_MACH_LPC1768 0
++#define CONFIG_MACH_LPC1769 0
++#define CONFIG_LPC_FLASH_START_4000 0
++#define CONFIG_LPC_FLASH_START_0000 0
++#define CONFIG_LPC_USB 0
++#define CONFIG_LPC_SERIAL_UART0_P03_P02 0
++#define CONFIG_LPC_SERIAL_UART3_P429_P428 0
++#define CONFIG_LPC_MMENU_CANBUS_P0_0_P0_1 0
++#define CONFIG_LPC_MMENU_CANBUS_P0_21_P0_22 0
++#define CONFIG_LPC_MMENU_CANBUS_P0_4_P0_5 0
++#define CONFIG_LPC_MMENU_CANBUS_P2_7_P2_8 0
++#define CONFIG_LPC_USBCANBUS 0
++#define CONFIG_LPC_CMENU_CANBUS_P0_0_P0_1 0
++#define CONFIG_LPC_CMENU_CANBUS_P0_21_P0_22 0
++#define CONFIG_LPC_CMENU_CANBUS_P0_4_P0_5 0
++#define CONFIG_LPC_CMENU_CANBUS_P2_7_P2_8 0
++#define CONFIG_LPC_CANBUS_P0_0_P0_1 0
++#define CONFIG_LPC_CANBUS_P0_21_P0_22 0
++#define CONFIG_LPC_CANBUS_P0_4_P0_5 0
++#define CONFIG_LPC_CANBUS_P2_7_P2_8 0
++#define CONFIG_STM32_SELECT 0
++#define CONFIG_MACH_AT32F403 0
++#define CONFIG_MACH_STM32F103 0
++#define CONFIG_MACH_STM32F207 0
++#define CONFIG_MACH_STM32F401 0
++#define CONFIG_MACH_STM32F411 0
++#define CONFIG_MACH_STM32F405 0
++#define CONFIG_MACH_STM32F407 0
++#define CONFIG_MACH_STM32F427 0
++#define CONFIG_MACH_STM32F429 0
++#define CONFIG_MACH_STM32F446 0
++#define CONFIG_MACH_STM32F765 0
++#define CONFIG_MACH_STM32F031 0
++#define CONFIG_MACH_STM32F042 0
++#define CONFIG_MACH_STM32F070 0
++#define CONFIG_MACH_STM32F072 0
++#define CONFIG_MACH_STM32G070 0
++#define CONFIG_MACH_STM32G071 0
++#define CONFIG_MACH_STM32G0B0 0
++#define CONFIG_MACH_STM32G0B1 0
++#define CONFIG_MACH_STM32G431 0
++#define CONFIG_MACH_STM32G474 0
++#define CONFIG_MACH_STM32H723 0
++#define CONFIG_MACH_STM32H743 0
++#define CONFIG_MACH_STM32H750 0
++#define CONFIG_MACH_STM32L412 0
++#define CONFIG_MACH_N32G452 0
++#define CONFIG_MACH_N32G455 0
++#define CONFIG_MACH_STM32F103x6 0
++#define CONFIG_MACH_STM32F070x6 0
++#define CONFIG_MACH_STM32F0 0
++#define CONFIG_MACH_STM32F1 0
++#define CONFIG_MACH_STM32F2 0
++#define CONFIG_MACH_STM32F4 0
++#define CONFIG_MACH_STM32F7 0
++#define CONFIG_MACH_STM32G0 0
++#define CONFIG_MACH_STM32G07x 0
++#define CONFIG_MACH_STM32G0Bx 0
++#define CONFIG_MACH_STM32G4 0
++#define CONFIG_MACH_STM32H7 0
++#define CONFIG_MACH_STM32F0x2 0
++#define CONFIG_MACH_STM32F4x5 0
++#define CONFIG_MACH_STM32L4 0
++#define CONFIG_MACH_N32G45x 0
++#define CONFIG_HAVE_STM32_USBFS 0
++#define CONFIG_HAVE_STM32_USBOTG 0
++#define CONFIG_STM32_USB_DOUBLE_BUFFER_TX 0
++#define CONFIG_HAVE_STM32_CANBUS 0
++#define CONFIG_HAVE_STM32_FDCANBUS 0
++#define CONFIG_HAVE_STM32_USBCANBUS 0
++#define CONFIG_STM32F103GD_DISABLE_SWD 0
++#define CONFIG_STM32_DFU_ROM_ADDRESS 0x
++#define CONFIG_STM32_FLASH_START_2000 0
++#define CONFIG_STM32_FLASH_START_5000 0
++#define CONFIG_STM32_FLASH_START_7000 0
++#define CONFIG_STM32_FLASH_START_8000 0
++#define CONFIG_STM32_FLASH_START_8800 0
++#define CONFIG_STM32_FLASH_START_9000 0
++#define CONFIG_STM32_FLASH_START_C000 0
++#define CONFIG_STM32_FLASH_START_10000 0
++#define CONFIG_STM32_FLASH_START_800 0
++#define CONFIG_STM32_FLASH_START_1000 0
++#define CONFIG_STM32_FLASH_START_4000 0
++#define CONFIG_STM32_FLASH_START_20000 0
++#define CONFIG_STM32_FLASH_START_20200 0
++#define CONFIG_STM32_FLASH_START_0000 0
++#define CONFIG_ARMCM_RAM_VECTORTABLE 0
++#define CONFIG_STM32_CLOCK_REF_8M 0
++#define CONFIG_STM32_CLOCK_REF_12M 0
++#define CONFIG_STM32_CLOCK_REF_16M 0
++#define CONFIG_STM32_CLOCK_REF_20M 0
++#define CONFIG_STM32_CLOCK_REF_24M 0
++#define CONFIG_STM32_CLOCK_REF_25M 0
++#define CONFIG_STM32_CLOCK_REF_INTERNAL 0
++#define CONFIG_CLOCK_REF_FREQ 0
++#define CONFIG_STM32F0_TRIM 0
++#define CONFIG_STM32_USB_PA11_PA12 0
++#define CONFIG_STM32_USB_PA11_PA12_REMAP 0
++#define CONFIG_STM32_USB_PB14_PB15 0
++#define CONFIG_STM32_SERIAL_USART1 0
++#define CONFIG_STM32_SERIAL_USART1_ALT_PB7_PB6 0
++#define CONFIG_STM32_SERIAL_USART2 0
++#define CONFIG_STM32_SERIAL_USART2_ALT_PA15_PA14 0
++#define CONFIG_STM32_SERIAL_USART2_ALT_PB4_PB3 0
++#define CONFIG_STM32_SERIAL_USART2_ALT_PD6_PD5 0
++#define CONFIG_STM32_SERIAL_USART3 0
++#define CONFIG_STM32_SERIAL_USART3_ALT_PD9_PD8 0
++#define CONFIG_STM32_SERIAL_USART3_ALT_PC11_PC10 0
++#define CONFIG_STM32_SERIAL_UART4 0
++#define CONFIG_STM32_SERIAL_USART5 0
++#define CONFIG_STM32_SERIAL_USART6 0
++#define CONFIG_STM32_SERIAL_USART6_ALT_PC7_PC6 0
++#define CONFIG_STM32_CANBUS_PA11_PA12 0
++#define CONFIG_STM32_CANBUS_PA11_PA12_REMAP 0
++#define CONFIG_STM32_CANBUS_PA11_PB9 0
++#define CONFIG_STM32_MMENU_CANBUS_PB8_PB9 0
++#define CONFIG_STM32_MMENU_CANBUS_PI9_PH13 0
++#define CONFIG_STM32_MMENU_CANBUS_PB5_PB6 0
++#define CONFIG_STM32_MMENU_CANBUS_PB12_PB13 0
++#define CONFIG_STM32_MMENU_CANBUS_PD0_PD1 0
++#define CONFIG_STM32_MMENU_CANBUS_PB0_PB1 0
++#define CONFIG_STM32_MMENU_CANBUS_PD12_PD13 0
++#define CONFIG_STM32_MMENU_CANBUS_PC2_PC3 0
++#define CONFIG_STM32_MMENU_CANBUS_PH13_PH14 0
++#define CONFIG_STM32_USBCANBUS_PA11_PA12 0
++#define CONFIG_STM32_SERIAL_RS485 0
++#define CONFIG_STM32_SERIAL_RS485_DE_PIN ""
++#define CONFIG_STM32_SERIAL_RS485_TURNAROUND_US 0
++#define CONFIG_STM32_CMENU_CANBUS_PB8_PB9 0
++#define CONFIG_STM32_CMENU_CANBUS_PI9_PH13 0
++#define CONFIG_STM32_CMENU_CANBUS_PB5_PB6 0
++#define CONFIG_STM32_CMENU_CANBUS_PB12_PB13 0
++#define CONFIG_STM32_CMENU_CANBUS_PD0_PD1 0
++#define CONFIG_STM32_CMENU_CANBUS_PB0_PB1 0
++#define CONFIG_STM32_CMENU_CANBUS_PD12_PD13 0
++#define CONFIG_STM32_CMENU_CANBUS_PC2_PC3 0
++#define CONFIG_STM32_CMENU_CANBUS_PH13_PH14 0
++#define CONFIG_STM32_CANBUS_PB8_PB9 0
++#define CONFIG_STM32_CANBUS_PI9_PH13 0
++#define CONFIG_STM32_CANBUS_PB5_PB6 0
++#define CONFIG_STM32_CANBUS_PB12_PB13 0
++#define CONFIG_STM32_CANBUS_PD0_PD1 0
++#define CONFIG_STM32_CANBUS_PB0_PB1 0
++#define CONFIG_STM32_CANBUS_PD12_PD13 0
++#define CONFIG_STM32_CANBUS_PC2_PC3 0
++#define CONFIG_STM32_CANBUS_PH13_PH14 0
++#define CONFIG_HC32F460_SELECT 0
++#define CONFIG_HC32F460_SERIAL_PA7_PA8 0
++#define CONFIG_HC32F460_SERIAL_PA13_PA14 0
++#define CONFIG_HC32F460_SERIAL_PA3_PA2 0
++#define CONFIG_HC32F460_SERIAL_PH2_PB10 0
++#define CONFIG_HC32F460_SERIAL_PA15_PA9 0
++#define CONFIG_HC32F460_SERIAL_PC0_PC1 0
++#define CONFIG_HC32F460_FLASH_APPLICATION_ADDRESS_0x008000 0
++#define CONFIG_HC32F460_FLASH_APPLICATION_ADDRESS_0x00C000 0
++#define CONFIG_HC32F460_FLASH_APPLICATION_ADDRESS_0x010000 0
++#define CONFIG_HC32F460_CLOCK_SPEED_168M 0
++#define CONFIG_HC32F460_CLOCK_SPEED_200M 0
++#define CONFIG_RPXXXX_SELECT 0
++#define CONFIG_MACH_RP2040 0
++#define CONFIG_MACH_RP2350 0
++#define CONFIG_RP2040_HAVE_STAGE2 0
++#define CONFIG_RPXXXX_HAVE_BOOTLOADER 0
++#define CONFIG_RPXXXX_FLASH_START_0000 0
++#define CONFIG_RPXXXX_FLASH_START_0100 0
++#define CONFIG_RPXXXX_FLASH_START_4000 0
++#define CONFIG_RP2040_FLASH_W25Q080 0
++#define CONFIG_RP2040_FLASH_GENERIC_03 0
++#define CONFIG_RP2040_FLASH_GENERIC_03_CLKDIV8 0
++#define CONFIG_RP2040_STAGE2_FILE ""
++#define CONFIG_RP2040_STAGE2_CLKDIV 0
++#define CONFIG_RPXXXX_USB 0
++#define CONFIG_RPXXXX_SERIAL_UART0_PINS_0_1 0
++#define CONFIG_RPXXXX_SERIAL_UART0_PINS_12_13 0
++#define CONFIG_RPXXXX_SERIAL_UART0_PINS_16_17 0
++#define CONFIG_RPXXXX_SERIAL_UART0_PINS_28_29 0
++#define CONFIG_RPXXXX_SERIAL_UART1_PINS_4_5 0
++#define CONFIG_RPXXXX_SERIAL_UART1_PINS_8_9 0
++#define CONFIG_RPXXXX_SERIAL_UART1_PINS_20_21 0
++#define CONFIG_RPXXXX_SERIAL_UART1_PINS_24_25 0
++#define CONFIG_RPXXXX_CANBUS 0
++#define CONFIG_RPXXXX_USBCANBUS 0
++#define CONFIG_RPXXXX_CANBUS_GPIO_RX 0
++#define CONFIG_RPXXXX_CANBUS_GPIO_TX 0
++#define CONFIG_PRU_SELECT 0
++#define CONFIG_AR100_SELECT 0
++#define CONFIG_HIFI4_SELECT 1
++#define CONFIG_HIFI4_WATCHDOG 1
++#define CONFIG_HIFI4_MSGBOX 1
++#define CONFIG_HIFI4_SERIAL_UART0 0
++#define CONFIG_HIFI4_SERIAL_UART1 0
++#define CONFIG_HIFI4_SERIAL_UART2 0
++#define CONFIG_HIFI4_SERIAL_UART3 0
++#define CONFIG_HIFI4_SERIAL_UART4 0
++#define CONFIG_HIFI4_SERIAL_UART5 0
++#define CONFIG_LINUX_SELECT 0
++#define CONFIG_SIMULATOR_SELECT 0
++#define CONFIG_SERIAL_BOOTLOADER_SIDECHANNEL 0
++#define CONFIG_SERIAL_BAUD 0
++#define CONFIG_USBCANBUS 0
++#define CONFIG_USB 0
++#define CONFIG_USB_VENDOR_ID 0x1d50
++#define CONFIG_USB_DEVICE_ID 0x614e
++#define CONFIG_USB_SERIAL_NUMBER_CHIPID 0
++#define CONFIG_USB_SERIAL_NUMBER "12345"
++#define CONFIG_USB_MANUFACTURER "Klipper"
++#define CONFIG_USB_PRODUCT_FROM_MCU 0
++#define CONFIG_USB_PRODUCT ""
++#define CONFIG_CAN_UUID_USE_CHIPID 0
++#define CONFIG_CAN_UUID_CUSTOM "abc1234"
++#define CONFIG_WANT_ADC 1
++#define CONFIG_WANT_SPI 0
++#define CONFIG_WANT_SOFTWARE_SPI 0
++#define CONFIG_WANT_I2C 0
++#define CONFIG_WANT_SOFTWARE_I2C 0
++#define CONFIG_WANT_HARD_PWM 0
++#define CONFIG_WANT_BUTTONS 1
++#define CONFIG_WANT_TMCUART 1
++#define CONFIG_WANT_NEOPIXEL 0
++#define CONFIG_WANT_PULSE_COUNTER 1
++#define CONFIG_WANT_DRV8833 0
++#define CONFIG_WANT_ST7920 0
++#define CONFIG_WANT_HD44780 0
++#define CONFIG_WANT_ADXL345 0
++#define CONFIG_WANT_LIS2DW 0
++#define CONFIG_WANT_MPU9250 0
++#define CONFIG_WANT_ICM20948 0
++#define CONFIG_WANT_THERMOCOUPLE 0
++#define CONFIG_WANT_HX71X 0
++#define CONFIG_WANT_HX711S 0
++#define CONFIG_WANT_ADS1220 0
++#define CONFIG_WANT_ADS131M0X 0
++#define CONFIG_WANT_CS1237 0
++#define CONFIG_WANT_LDC1612 0
++#define CONFIG_WANT_SENSOR_ANGLE 0
++#define CONFIG_WANT_GPIO_SPI 0
++#define CONFIG_WANT_GPIO_ADC 1
++#define CONFIG_WANT_GPIO_I2C 0
++#define CONFIG_NEED_SENSOR_BULK 0
++#define CONFIG_NEED_LOAD_CELL_PROBE 0
++#define CONFIG_NEED_SOS_FILTER 0
++#define CONFIG_WANT_OPTIMIZE_SIZE 0
++#define CONFIG_WANT_GPIO_BUTTONS 0
++#define CONFIG_WANT_INDX_HEATER 0
++#define CONFIG_CANSERIAL 0
++#define CONFIG_CANBUS 0
++#define CONFIG_CANBUS_FREQUENCY 1000000
++#define CONFIG_CANBUS_FILTER 0
++#define CONFIG_INLINE_STEPPER_HACK 1
++#define CONFIG_HAVE_STEPPER_OPTIMIZED_BOTH_EDGE 0
++#define CONFIG_WANT_STEPPER_OPTIMIZED_BOTH_EDGE 0
++#define CONFIG_INITIAL_PINS ""
++#define CONFIG_HAVE_GPIO 1
++#define CONFIG_HAVE_GPIO_ADC 1
++#define CONFIG_HAVE_GPIO_SPI 1
++#define CONFIG_HAVE_GPIO_SDIO 0
++#define CONFIG_HAVE_GPIO_I2C 0
++#define CONFIG_HAVE_GPIO_HARD_PWM 1
++#define CONFIG_HAVE_STRICT_TIMING 0
++#define CONFIG_HAVE_CHIPID 0
++#define CONFIG_HAVE_BOOTLOADER_REQUEST 0
++#define CONFIG_HAVE_LIMITED_CODE_SIZE 0
++#define CONFIG_HAVE_SOFTWARE_DIVIDE_REQUIRED 0
+diff --git a/firmware/configs/cosmos-cc1-dsp/config b/firmware/configs/cosmos-cc1-dsp/config
+new file mode 100644
+index 0000000..1dd0a92
+--- /dev/null
++++ b/firmware/configs/cosmos-cc1-dsp/config
+@@ -0,0 +1,79 @@
++CONFIG_LOW_LEVEL_OPTIONS=y
++# CONFIG_MACH_AVR is not set
++# CONFIG_MACH_ATSAM is not set
++# CONFIG_MACH_ATSAMD is not set
++# CONFIG_MACH_LPC176X is not set
++# CONFIG_MACH_STM32 is not set
++# CONFIG_MACH_HC32F460 is not set
++# CONFIG_MACH_RPXXXX is not set
++# CONFIG_MACH_PRU is not set
++# CONFIG_MACH_AR100 is not set
++CONFIG_MACH_HIFI4=y
++# CONFIG_MACH_LINUX is not set
++# CONFIG_MACH_SIMU is not set
++CONFIG_BOARD_DIRECTORY="hifi4"
++CONFIG_CLOCK_FREQ=600000000
++CONFIG_HIFI4_SELECT=y
++CONFIG_HIFI4_WATCHDOG=y
++CONFIG_HIFI4_MSGBOX=y
++# CONFIG_HIFI4_SERIAL_UART0 is not set
++# CONFIG_HIFI4_SERIAL_UART1 is not set
++# CONFIG_HIFI4_SERIAL_UART2 is not set
++# CONFIG_HIFI4_SERIAL_UART3 is not set
++# CONFIG_HIFI4_SERIAL_UART4 is not set
++# CONFIG_HIFI4_SERIAL_UART5 is not set
++CONFIG_USB_VENDOR_ID=0x1d50
++CONFIG_USB_DEVICE_ID=0x614e
++CONFIG_USB_SERIAL_NUMBER="12345"
++CONFIG_USB_MANUFACTURER="Klipper"
++CONFIG_CAN_UUID_CUSTOM="abc1234"
++CONFIG_WANT_ADC=y
++# CONFIG_WANT_SOFTWARE_SPI is not set
++# CONFIG_WANT_SOFTWARE_I2C is not set
++# CONFIG_WANT_HARD_PWM is not set
++CONFIG_WANT_BUTTONS=y
++CONFIG_WANT_TMCUART=y
++# CONFIG_WANT_NEOPIXEL is not set
++CONFIG_WANT_PULSE_COUNTER=y
++# CONFIG_WANT_ST7920 is not set
++# CONFIG_WANT_HD44780 is not set
++# CONFIG_WANT_HX71X is not set
++# CONFIG_WANT_HX711S is not set
++# CONFIG_WANT_CS1237 is not set
++# CONFIG_WANT_GPIO_SPI is not set
++CONFIG_WANT_GPIO_ADC=y
++# CONFIG_WANT_OPTIMIZE_SIZE is not set
++
++#
++# Feature Configuration
++#
++
++#
++# Microcontroller interfaces
++#
++# CONFIG_WANT_GPIO_BUTTONS is not set
++
++#
++# ----
++#
++
++#
++# LCD chips
++#
++
++#
++# External ADC type chips
++#
++
++#
++# Compiler options
++#
++# end of Feature Configuration
++
++CONFIG_CANBUS_FREQUENCY=1000000
++CONFIG_INLINE_STEPPER_HACK=y
++CONFIG_INITIAL_PINS=""
++CONFIG_HAVE_GPIO=y
++CONFIG_HAVE_GPIO_ADC=y
++CONFIG_HAVE_GPIO_SPI=y
++CONFIG_HAVE_GPIO_HARD_PWM=y
+diff --git a/firmware/configs/cosmos-cc1-dsp/defconfig b/firmware/configs/cosmos-cc1-dsp/defconfig
+new file mode 100644
+index 0000000..b909487
+--- /dev/null
++++ b/firmware/configs/cosmos-cc1-dsp/defconfig
+@@ -0,0 +1,12 @@
++CONFIG_LOW_LEVEL_OPTIONS=y
++CONFIG_MACH_HIFI4=y
++# CONFIG_WANT_SOFTWARE_SPI is not set
++# CONFIG_WANT_SOFTWARE_I2C is not set
++# CONFIG_WANT_HARD_PWM is not set
++# CONFIG_WANT_NEOPIXEL is not set
++# CONFIG_WANT_ST7920 is not set
++# CONFIG_WANT_HD44780 is not set
++# CONFIG_WANT_HX71X is not set
++# CONFIG_WANT_HX711S is not set
++# CONFIG_WANT_CS1237 is not set
++# CONFIG_WANT_GPIO_SPI is not set
+diff --git a/firmware/src/generic/mod.rs b/firmware/src/generic/mod.rs
+index 391b846..37ef7ce 100644
+--- a/firmware/src/generic/mod.rs
++++ b/firmware/src/generic/mod.rs
+@@ -27,7 +27,7 @@ pub mod gpio_h;
+ pub mod fasthash;
+ #[cfg(CONFIG_SERIAL)]
+ pub mod serial_irq;
+-#[cfg(any(CONFIG_MACH_STM32F0, CONFIG_MACH_STM32G0, CONFIG_MACH_RP2040, CONFIG_MACH_SIMU, CONFIG_MACH_SAMX2))]
++#[cfg(any(CONFIG_MACH_STM32F0, CONFIG_MACH_STM32G0, CONFIG_MACH_RP2040, CONFIG_MACH_SIMU, CONFIG_MACH_SAMX2, CONFIG_MACH_HIFI4))]
+ pub mod timer_irq;
+ #[cfg(CONFIG_USBSERIAL)]
+ pub mod usb_cdc;
+diff --git a/firmware/src/hifi4/com.rs b/firmware/src/hifi4/com.rs
+new file mode 100644
+index 0000000..a68c7aa
+--- /dev/null
++++ b/firmware/src/hifi4/com.rs
+@@ -0,0 +1,134 @@
++// Support for serial port over sharespace with msgbox interrupts: the
++// command receive and transmit buffers over the RPMsg endpoint
++// (src/hifi4/com.c).
++//
++// Copyright (C) 2026  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::rpmsg::{rpmsg_sendto, RpmsgEndpoint, RPMSG_ADDR_ANY};
++use crate::command::{command_encode_and_frame, command_find_and_dispatch, CommandEncoder, SendArg};
++use crate::ctr::Global;
++use crate::generic::pgm::readp;
++use crate::sched::{sched_check_wake, sched_wake_task, TaskWake, R};
++use crate::{decl_constant, decl_task};
++use core::ptr::null_mut;
++
++const RX_BUFFER_SIZE: usize = 192;
++const TX_BUFFER_SIZE: usize = 192;
++
++static RECEIVE_BUF: Global<[u8; RX_BUFFER_SIZE]> = Global::new([0; RX_BUFFER_SIZE]);
++static RECEIVE_POS: Global<u8> = Global::new(0);
++static TRANSMIT_BUF: Global<[u8; TX_BUFFER_SIZE]> = Global::new([0; TX_BUFFER_SIZE]);
++static TRANSMIT_POS: Global<u8> = Global::new(0);
++
++decl_constant!("RECEIVE_WINDOW", RX_BUFFER_SIZE);
++decl_constant!("TRANSMIT_WINDOW", TX_BUFFER_SIZE);
++
++// The RPMsg endpoint (set by rpmsg_transport_init())
++static KLIPPER_EPT: Global<*mut RpmsgEndpoint> = Global::new(null_mut());
++
++pub fn com_set_endpoint(ept: &'static mut RpmsgEndpoint) {
++    *KLIPPER_EPT.get() = ept;
++}
++
++/****************************************************************
++ * Message block reading
++ ****************************************************************/
++
++static RPMSG_CONSUME_WAKE: Global<TaskWake> = Global::new(TaskWake::new());
++
++// Called from the RPMsg endpoint callback (interrupt context): copy the
++// payload into the receive buffer (dropping what does not fit)
++pub fn rpmsg_notify_rx(data: &[u8]) {
++    let rpos = *RECEIVE_POS.get() as usize;
++    let len = data.len().min(RX_BUFFER_SIZE - rpos);
++    if len > 0 {
++        RECEIVE_BUF.get()[rpos..rpos + len].copy_from_slice(&data[..len]);
++        *RECEIVE_POS.get() = (rpos + len) as u8;
++    }
++    sched_wake_task(RPMSG_CONSUME_WAKE.ptr());
++}
++
++// Process any incoming commands
++pub fn rpmsg_consume_task() -> R {
++    if !sched_check_wake(RPMSG_CONSUME_WAKE.ptr()) {
++        return Ok(());
++    }
++
++    let mut rpos = *RECEIVE_POS.get() as usize;
++    let mut pop_count = 0;
++
++    // Process a message block
++    let ret = command_find_and_dispatch(&RECEIVE_BUF.get()[..rpos], &mut pop_count)?;
++    if ret != 0 {
++        // Move buffer
++        let needcopy = rpos - pop_count;
++        if needcopy != 0 {
++            RECEIVE_BUF.get().copy_within(pop_count..rpos, 0);
++        }
++        rpos = needcopy;
++    }
++    *RECEIVE_POS.get() = rpos as u8;
++
++    if rpos != 0 {
++        sched_wake_task(RPMSG_CONSUME_WAKE.ptr());
++    }
++    Ok(())
++}
++decl_task!(rpmsg_consume_task);
++
++/****************************************************************
++ * Message block sending
++ ****************************************************************/
++
++static RPMSG_SEND_WAKE: Global<TaskWake> = Global::new(TaskWake::new());
++
++fn rpmsg_notify_send() {
++    sched_wake_task(RPMSG_SEND_WAKE.ptr());
++}
++
++pub fn rpmsg_send_task() -> R {
++    if !sched_check_wake(RPMSG_SEND_WAKE.ptr()) {
++        return Ok(());
++    }
++
++    let tpos = *TRANSMIT_POS.get() as usize;
++    let ept = *KLIPPER_EPT.get();
++    if tpos == 0 || ept.is_null() {
++        return Ok(());
++    }
++    let ept = unsafe { &*ept };
++
++    // Don't attempt to send until Linux has connected
++    if ept.dst == RPMSG_ADDR_ANY {
++        return Ok(());
++    }
++
++    // Send the entire pending buffer as one RPMsg message
++    if rpmsg_sendto(ept, &TRANSMIT_BUF.get()[..tpos]) < 0 {
++        // No TX buffer available - retry later
++        sched_wake_task(RPMSG_SEND_WAKE.ptr());
++        return Ok(());
++    }
++    *TRANSMIT_POS.get() = 0;
++    Ok(())
++}
++decl_task!(rpmsg_send_task);
++
++pub fn console_sendf(ce: &CommandEncoder, args: &[SendArg]) -> R {
++    // Verify space for message
++    let tpos = *TRANSMIT_POS.get() as usize;
++    let max_size = readp(&ce.max_size) as usize;
++    if tpos + max_size > TX_BUFFER_SIZE {
++        // Not enough space for message
++        return Ok(());
++    }
++
++    // Generate message
++    let msglen = command_encode_and_frame(&mut TRANSMIT_BUF.get()[tpos..], ce, args)?;
++
++    // Start message transmit
++    *TRANSMIT_POS.get() = (tpos + msglen) as u8;
++    rpmsg_notify_send();
++    Ok(())
++}
+diff --git a/firmware/src/hifi4/gpio.rs b/firmware/src/hifi4/gpio.rs
+new file mode 100644
+index 0000000..fba27e5
+--- /dev/null
++++ b/firmware/src/hifi4/gpio.rs
+@@ -0,0 +1,106 @@
++// GPIO functions on hifi4.
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::gpio_h::{GpioAdc, GpioIn, GpioOut, GpioOutVal, GpioPullUp, GpioPwm, SpiConfig};
++use super::irq::{irq_restore, irq_save};
++use super::lib::gpadc::{gpadc_channel_enable, gpadc_clear_status, gpadc_has_data, gpadc_init, gpadc_read_data, gpadc_start_continuous};
++#[allow(unused_imports)]
++use super::lib::gpadc::GPADC_MAX_VALUE;
++use super::lib::gpio::{gpio_init, gpio_read, gpio_set_mode, gpio_set_pull, gpio_toggle, gpio_write, GpioPinT, GPIO_MODE_INPUT, GPIO_MODE_OUTPUT, GPIO_PULL_NONE, GPIO_PULL_UP};
++use crate::generic::timer_irq::timer_from_us;
++use crate::sched::R;
++use crate::{decl_constant, decl_enumeration_range, decl_init, shutdown};
++
++decl_enumeration_range!("pin", "PB0", 1 * 32, 16); // 13 + 3 ADC pins
++decl_enumeration_range!("pin", "PC0", 2 * 32, 8);
++decl_enumeration_range!("pin", "PD0", 3 * 32, 23);
++decl_enumeration_range!("pin", "PE0", 4 * 32, 18);
++decl_enumeration_range!("pin", "PF0", 5 * 32, 7);
++decl_enumeration_range!("pin", "PG0", 6 * 32, 19);
++
++decl_constant!("ADC_MAX", GPADC_MAX_VALUE); // 12bit adc
++
++// (C: a uint8_t pin parameter)
++fn gpio_pin(pin: u32) -> GpioPinT {
++    let pin = pin as u8;
++    GpioPinT { port: (pin / 32) as u32, pin: pin % 32 }
++}
++
++pub fn gpio_out_setup(pin: u32, val: GpioOutVal) -> R<GpioOut> {
++    gpio_init();
++    let g = GpioOut { pin: gpio_pin(pin) };
++    gpio_out_reset(g, val)?;
++    Ok(g)
++}
++pub fn gpio_out_reset(g: GpioOut, val: GpioOutVal) -> R {
++    gpio_set_mode(g.pin, GPIO_MODE_OUTPUT);
++    gpio_out_write(g, val);
++    Ok(())
++}
++pub fn gpio_out_toggle_noirq(g: GpioOut) {
++    gpio_toggle(g.pin);
++}
++pub fn gpio_out_toggle(g: GpioOut) {
++    let flag = irq_save();
++    gpio_out_toggle_noirq(g);
++    irq_restore(flag);
++}
++pub fn gpio_out_write(g: GpioOut, val: u8) {
++    gpio_write(g.pin, val != 0);
++}
++pub fn gpio_in_setup(pin: u32, pull_up: GpioPullUp) -> R<GpioIn> {
++    gpio_init();
++    let g = GpioIn { pin: gpio_pin(pin) };
++    gpio_in_reset(g, pull_up)?;
++    Ok(g)
++}
++pub fn gpio_in_reset(g: GpioIn, pull_up: GpioPullUp) -> R {
++    gpio_set_mode(g.pin, GPIO_MODE_INPUT);
++    gpio_set_pull(g.pin, if pull_up != 0 { GPIO_PULL_UP } else { GPIO_PULL_NONE });
++    Ok(())
++}
++pub fn gpio_in_read(g: GpioIn) -> u8 {
++    gpio_read(g.pin) as u8
++}
++// (C: a uint8_t val, the low byte of the pwmcmds value; no hardware pwm)
++pub fn gpio_pwm_setup(pin: u32, _cycle_time: u32, _val: u16) -> R<GpioPwm> {
++    Ok(GpioPwm { pin: pin as u8 })
++}
++pub fn gpio_pwm_write(_g: GpioPwm, _val: u16) {}
++
++pub fn gpio_adc_setup(pin: u32) -> R<GpioAdc> {
++    let pin = pin as u8;
++    // Valid ADC pins PB13-PB15
++    if pin < (32 + 13) || pin > (32 + 13 + 3) {
++        shutdown!("Not a valid ADC pin");
++    }
++    let chan = (pin - (32 + 13)) as u32;
++    gpadc_channel_enable(chan);
++    gpadc_start_continuous(chan);
++    Ok(GpioAdc { chan })
++}
++pub fn adc_init() -> R {
++    gpadc_init(1000);
++    Ok(())
++}
++decl_init!(adc_init);
++pub fn gpio_adc_sample(g: GpioAdc) -> u32 {
++    if gpadc_has_data(g.chan) {
++        return 0;
++    }
++    timer_from_us(20)
++}
++pub fn gpio_adc_read(g: GpioAdc) -> R<u16> {
++    let data = gpadc_read_data(g.chan);
++    gpadc_clear_status(g.chan);
++    Ok(data)
++}
++pub fn gpio_adc_cancel_sample(_g: GpioAdc) {}
++
++pub fn spi_setup(_bus: u32, _mode: u8, _rate: u32) -> R<SpiConfig> {
++    Ok(SpiConfig::default())
++}
++pub fn spi_prepare(_config: SpiConfig) {}
++pub fn spi_transfer(_config: SpiConfig, _receive_data: u8, _data: &mut [u8]) {}
+diff --git a/firmware/src/hifi4/gpio_h.rs b/firmware/src/hifi4/gpio_h.rs
+new file mode 100644
+index 0000000..6d02d1e
+--- /dev/null
++++ b/firmware/src/hifi4/gpio_h.rs
+@@ -0,0 +1,47 @@
++// The board's gpio.h (hifi4/gpio.h): the types of the gpio, adc, pwm and
++// spi functions (the same sizes as the C structs: they are part of the
++// objects of the command modules)
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::lib::gpadc::GpadcChannel;
++use super::lib::gpio::GpioPinT;
++
++// the value / pull_up parameter types of gpio_out_setup() / gpio_in_setup()
++pub type GpioOutVal = u8;
++pub type GpioPullUp = i8;
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++pub struct GpioOut {
++    pub pin: GpioPinT,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++pub struct GpioIn {
++    pub pin: GpioPinT,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++pub struct GpioPwm {
++    pub pin: u8,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++pub struct GpioAdc {
++    pub chan: GpadcChannel,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy, Default)]
++pub struct SpiConfig {
++    pub cfg: u32,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++pub struct I2cConfig {
++    pub cfg: u32,
++}
+diff --git a/firmware/src/hifi4/irq.rs b/firmware/src/hifi4/irq.rs
+new file mode 100644
+index 0000000..1517c8f
+--- /dev/null
++++ b/firmware/src/hifi4/irq.rs
+@@ -0,0 +1,48 @@
++// Interrupt functions on hifi4.
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::lib::hal_core::{hal_get_intenable, hal_set_intenable, irq_global_disable, irq_global_enable};
++use crate::sched::R;
++use core::arch::asm;
++
++pub type IrqStatus = u32;
++
++// Disable hardware interrupts
++pub fn irq_disable() {
++    irq_global_disable();
++}
++
++// Enable hardware interrupts
++pub fn irq_enable() {
++    irq_global_enable();
++}
++
++// Disable hardware interrupts in not already disabled (the flag is the
++// INTENABLE register, as the C code saves; irq_restore() writes it back
++// and leaves PS.INTLEVEL raised)
++pub fn irq_save() -> IrqStatus {
++    let flag = hal_get_intenable();
++    irq_disable();
++    flag
++}
++
++// Restore hardware interrupts to state from flag returned by irq_save()
++pub fn irq_restore(flag: IrqStatus) {
++    hal_set_intenable(flag);
++}
++
++// Atomically enable hardware interrupts and sleep processor until next irq
++pub fn irq_wait() -> R {
++    irq_global_enable();
++    unsafe { asm!("waiti 0") };
++    irq_global_disable();
++    Ok(())
++}
++
++// Check if an interrupt is active (used only on architectures that do
++// not have hardware interrupts)
++pub fn irq_poll() -> R {
++    Ok(())
++}
+diff --git a/firmware/src/hifi4/lib/ccu.rs b/firmware/src/hifi4/lib/ccu.rs
+new file mode 100644
+index 0000000..029b288
+--- /dev/null
++++ b/firmware/src/hifi4/lib/ccu.rs
+@@ -0,0 +1,36 @@
++// Clock Control Unit driver (lib/hifi4/ccu.c): the bus clocks the firmware enables
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::{bit, reg32, CCU_BASE};
++
++const CCU_GPADC_BGR: u32 = 0x09EC;
++const CCU_MSGBOX_BGR: u32 = 0x071C;
++const CCU_GPADC_GATING: u32 = bit(0);
++const CCU_GPADC_RST: u32 = bit(16);
++const CCU_MSGBOX_GATING: u32 = bit(1);
++const CCU_MSGBOX_RST: u32 = bit(17);
++
++fn ccu_set_bits(offset: u32, bits: u32) {
++    reg32(CCU_BASE + offset).or(bits);
++}
++
++// (the C `for (volatile int i = 0; i < 100; i++);` for the clock to
++// stabilize)
++fn settle() {
++    let mut i = 0u32;
++    while unsafe { core::ptr::read_volatile(&i) } < 100 {
++        unsafe { core::ptr::write_volatile(&mut i, i + 1) };
++    }
++}
++
++pub fn ccu_gpadc_enable() {
++    ccu_set_bits(CCU_GPADC_BGR, CCU_GPADC_GATING | CCU_GPADC_RST);
++    settle();
++}
++
++pub fn ccu_msgbox_enable() {
++    ccu_set_bits(CCU_MSGBOX_BGR, CCU_MSGBOX_GATING | CCU_MSGBOX_RST);
++    settle();
++}
+diff --git a/firmware/src/hifi4/lib/gpadc.rs b/firmware/src/hifi4/lib/gpadc.rs
+new file mode 100644
+index 0000000..192b8c5
+--- /dev/null
++++ b/firmware/src/hifi4/lib/gpadc.rs
+@@ -0,0 +1,111 @@
++// GPADC driver for Allwinner R528/T113 HiFi4 DSP (lib/hifi4/gpadc.c)
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::ccu::ccu_gpadc_enable;
++use super::{bit, reg32, CLK_FREQ_HOSC, GPADC_BASE};
++
++const GPADC_SR_CON: u32 = 0x00;
++const GPADC_CTRL: u32 = 0x04;
++const GPADC_CS_EN: u32 = 0x08;
++const GPADC_FIFO_INTC: u32 = 0x0C;
++const GPADC_FIFO_INTS: u32 = 0x10;
++const GPADC_DATAL_INTC: u32 = 0x20;
++const GPADC_DATAH_INTC: u32 = 0x24;
++const GPADC_DATA_INTC: u32 = 0x28;
++const GPADC_DATAL_INTS: u32 = 0x30;
++const GPADC_DATAH_INTS: u32 = 0x34;
++const GPADC_DATA_INTS: u32 = 0x38;
++const GPADC_CH0_DATA: u32 = 0x80;
++
++const GPADC_CTRL_ADC_EN: u32 = bit(16);
++const GPADC_CTRL_WORK_MODE_MASK: u32 = 0x3 << 18;
++const GPADC_CTRL_WORK_MODE_SINGLE: u32 = 0 << 18;
++const GPADC_CTRL_WORK_MODE_CONT: u32 = 2 << 18;
++const GPADC_CTRL_ADC_AUTOCALI_EN: u32 = bit(23);
++
++pub const GPADC_MAX_CHANNELS: u32 = 4;
++pub const GPADC_MAX_VALUE: u32 = (1 << 12) - 1;
++
++// (gpadc_channel_t)
++pub type GpadcChannel = u32;
++
++fn gpadc_write_reg(offset: u32, value: u32) {
++    reg32(GPADC_BASE + offset).write(value)
++}
++
++fn gpadc_read_reg(offset: u32) -> u32 {
++    reg32(GPADC_BASE + offset).read()
++}
++
++pub fn gpadc_init(sample_rate: u32) {
++    ccu_gpadc_enable();
++
++    // Sample rate = HOSC / ((fs_div + 1) * (tacq + 1))
++    let tacq: u32 = 63;
++    let mut fs_div: u32 = 4;
++    if sample_rate > 0 {
++        let divisor = CLK_FREQ_HOSC / sample_rate.wrapping_mul(tacq + 1);
++        if divisor > 0 {
++            fs_div = divisor - 1;
++        }
++        if fs_div > 0xFFFF {
++            fs_div = 0xFFFF;
++        }
++    }
++    gpadc_write_reg(GPADC_SR_CON, (fs_div & 0xFFFF) | ((tacq & 0xFFFF) << 16));
++
++    // Auto-calibration, single conversion mode initially
++    gpadc_write_reg(GPADC_CTRL, GPADC_CTRL_ADC_AUTOCALI_EN | GPADC_CTRL_WORK_MODE_SINGLE);
++
++    // Disable all channels initially
++    gpadc_write_reg(GPADC_CS_EN, 0);
++
++    // Clear any pending interrupts
++    gpadc_write_reg(GPADC_FIFO_INTS, 0xFFFFFFFF);
++    gpadc_write_reg(GPADC_DATAL_INTS, 0xFFFFFFFF);
++    gpadc_write_reg(GPADC_DATAH_INTS, 0xFFFFFFFF);
++    gpadc_write_reg(GPADC_DATA_INTS, 0xFFFFFFFF);
++
++    // Disable all interrupts initially
++    gpadc_write_reg(GPADC_FIFO_INTC, 0);
++    gpadc_write_reg(GPADC_DATAL_INTC, 0);
++    gpadc_write_reg(GPADC_DATAH_INTC, 0);
++    gpadc_write_reg(GPADC_DATA_INTC, 0);
++}
++
++pub fn gpadc_channel_enable(channel: GpadcChannel) {
++    if channel >= GPADC_MAX_CHANNELS {
++        return;
++    }
++    gpadc_write_reg(GPADC_CS_EN, gpadc_read_reg(GPADC_CS_EN) | bit(channel));
++}
++
++pub fn gpadc_start_continuous(channel: GpadcChannel) {
++    if channel >= GPADC_MAX_CHANNELS {
++        return;
++    }
++    gpadc_channel_enable(channel);
++
++    // Continuous conversion mode
++    let ctrl = gpadc_read_reg(GPADC_CTRL);
++    gpadc_write_reg(GPADC_CTRL, (ctrl & !GPADC_CTRL_WORK_MODE_MASK) | GPADC_CTRL_WORK_MODE_CONT | GPADC_CTRL_ADC_EN);
++
++    gpadc_write_reg(GPADC_DATA_INTC, gpadc_read_reg(GPADC_DATA_INTC) | bit(channel));
++}
++
++pub fn gpadc_read_data(channel: GpadcChannel) -> u16 {
++    if channel >= GPADC_MAX_CHANNELS {
++        return 0;
++    }
++    (gpadc_read_reg(GPADC_CH0_DATA + channel * 4) & GPADC_MAX_VALUE) as u16
++}
++
++pub fn gpadc_has_data(channel: GpadcChannel) -> bool {
++    gpadc_read_reg(GPADC_DATA_INTS) & bit(channel) != 0
++}
++
++pub fn gpadc_clear_status(channel: GpadcChannel) {
++    gpadc_write_reg(GPADC_DATA_INTS, bit(channel));
++}
+diff --git a/firmware/src/hifi4/lib/gpio.rs b/firmware/src/hifi4/lib/gpio.rs
+new file mode 100644
+index 0000000..f9b9259
+--- /dev/null
++++ b/firmware/src/hifi4/lib/gpio.rs
+@@ -0,0 +1,117 @@
++// GPIO driver for Allwinner R528/T113 HiFi4 DSP (lib/hifi4/gpio.c)
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::hal_core::{intc_enable, intc_register};
++use super::{bit, reg32, INTC_GPIOB_NS, INTC_GPIOC_NS, INTC_GPIOD_NS, INTC_GPIOE_NS, INTC_GPIOF_NS, INTC_GPIOG_NS, PIO_BASE};
++
++const fn gpio_port_offset(n: u32) -> u32 {
++    0x30 * n
++}
++const GPIO_CFG0: u32 = 0x00;
++const GPIO_DAT: u32 = 0x10;
++const GPIO_PULL0: u32 = 0x24;
++const fn gpio_eint_base(n: u32) -> u32 {
++    PIO_BASE + 0x200 + n * 0x20
++}
++const GPIO_EINT_CTL: u32 = 0x10;
++const GPIO_EINT_STATUS: u32 = 0x14;
++
++pub const GPIO_MODE_INPUT: u32 = 0;
++pub const GPIO_MODE_OUTPUT: u32 = 1;
++pub const GPIO_PULL_NONE: u32 = 0;
++pub const GPIO_PULL_UP: u32 = 1;
++
++// GPIO pin descriptor (gpio_pin_t: an enum port and a uint8_t pin)
++#[repr(C)]
++#[derive(Clone, Copy)]
++pub struct GpioPinT {
++    pub port: u32,
++    pub pin: u8,
++}
++
++fn gpio_port_base(port: u32) -> u32 {
++    PIO_BASE + gpio_port_offset(port)
++}
++
++pub fn gpio_set_mode(pin: GpioPinT, mode: u32) {
++    let base = gpio_port_base(pin.port);
++    let r = reg32(base + GPIO_CFG0 + (pin.pin as u32 / 8) * 4);
++    let bit_offset = (pin.pin as u32 % 8) * 4;
++    r.write((r.read() & !(0x0F << bit_offset)) | (mode << bit_offset));
++}
++
++pub fn gpio_set_pull(pin: GpioPinT, pull: u32) {
++    let base = gpio_port_base(pin.port);
++    let r = reg32(base + GPIO_PULL0 + (pin.pin as u32 / 16) * 4);
++    let bit_offset = (pin.pin as u32 % 16) * 2;
++    r.write((r.read() & !(0x03 << bit_offset)) | (pull << bit_offset));
++}
++
++pub fn gpio_write(pin: GpioPinT, value: bool) {
++    let r = reg32(gpio_port_base(pin.port) + GPIO_DAT);
++    let dat = r.read();
++    r.write(if value { dat | bit(pin.pin as u32) } else { dat & !bit(pin.pin as u32) });
++}
++
++pub fn gpio_read(pin: GpioPinT) -> bool {
++    reg32(gpio_port_base(pin.port) + GPIO_DAT).read() & bit(pin.pin as u32) != 0
++}
++
++pub fn gpio_toggle(pin: GpioPinT) {
++    let r = reg32(gpio_port_base(pin.port) + GPIO_DAT);
++    r.write(r.read() ^ bit(pin.pin as u32));
++}
++
++// Handle GPIO external interrupts for a specific port (no pin handler is
++// ever configured by the firmware: the pending and enabled bits are
++// cleared, as the C code does, with nothing to call)
++fn gpio_irq_handler(port: u32) {
++    let base = gpio_eint_base(port);
++    let status = reg32(base + GPIO_EINT_STATUS).read();
++    let enabled = reg32(base + GPIO_EINT_CTL).read();
++    let mut pending = status & enabled;
++    while pending != 0 {
++        let pin = pending.trailing_zeros();
++        reg32(base + GPIO_EINT_STATUS).write(bit(pin));
++        pending &= !bit(pin);
++    }
++}
++
++fn gpio_pb_irq_handler(_irq: u32) {
++    gpio_irq_handler(1);
++}
++fn gpio_pc_irq_handler(_irq: u32) {
++    gpio_irq_handler(2);
++}
++fn gpio_pd_irq_handler(_irq: u32) {
++    gpio_irq_handler(3);
++}
++fn gpio_pe_irq_handler(_irq: u32) {
++    gpio_irq_handler(4);
++}
++fn gpio_pf_irq_handler(_irq: u32) {
++    gpio_irq_handler(5);
++}
++fn gpio_pg_irq_handler(_irq: u32) {
++    gpio_irq_handler(6);
++}
++
++pub fn gpio_init() {
++    // Register port interrupt handlers
++    intc_register(INTC_GPIOB_NS, gpio_pb_irq_handler);
++    intc_register(INTC_GPIOC_NS, gpio_pc_irq_handler);
++    intc_register(INTC_GPIOD_NS, gpio_pd_irq_handler);
++    intc_register(INTC_GPIOE_NS, gpio_pe_irq_handler);
++    intc_register(INTC_GPIOF_NS, gpio_pf_irq_handler);
++    intc_register(INTC_GPIOG_NS, gpio_pg_irq_handler);
++
++    // Enable port interrupts at the system level
++    intc_enable(INTC_GPIOB_NS);
++    intc_enable(INTC_GPIOC_NS);
++    intc_enable(INTC_GPIOD_NS);
++    intc_enable(INTC_GPIOE_NS);
++    intc_enable(INTC_GPIOF_NS);
++    intc_enable(INTC_GPIOG_NS);
++}
+diff --git a/firmware/src/hifi4/lib/hal_core.rs b/firmware/src/hifi4/lib/hal_core.rs
+new file mode 100644
+index 0000000..390c9b3
+--- /dev/null
++++ b/firmware/src/hifi4/lib/hal_core.rs
+@@ -0,0 +1,224 @@
++// Core HAL implementation for Allwinner R528/T113 HiFi4 DSP (lib/hifi4/hal_core.c)
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++//
++// The HiFi4 DSP has a two-level interrupt structure: direct DSP core
++// interrupts (the Xtensa INTENABLE bits) and the DSP_INTC, which routes the
++// peripheral interrupts to one core interrupt (IRQ_INTC).
++use super::{bit, reg32, IrqHandler, IRQ_INTC, MAX_INTC_NUM, MAX_IRQ_NUM};
++use crate::ctr::Global;
++use core::arch::asm;
++
++// DSP Interrupt Controller
++const DSP_INTC_BASE: u32 = 0x01700800;
++const DSP_INTC_PEND0: u32 = 0x10;
++const DSP_INTC_EN0: u32 = 0x40;
++const DSP_INTC_EN1: u32 = 0x44;
++const DSP_INTC_EN2: u32 = 0x48;
++const DSP_INTC_MASK0: u32 = 0x50;
++const DSP_INTC_MASK1: u32 = 0x54;
++const DSP_INTC_MASK2: u32 = 0x58;
++
++// Handler tables: direct DSP core interrupts and DSP_INTC peripheral ones
++static IRQ_TABLE: Global<[Option<IrqHandler>; MAX_IRQ_NUM]> = Global::new([None; MAX_IRQ_NUM]);
++static INTC_TABLE: Global<[Option<IrqHandler>; MAX_INTC_NUM]> = Global::new([None; MAX_INTC_NUM]);
++
++/****************************************************************
++ * Xtensa special registers
++ ****************************************************************/
++
++#[inline(always)]
++pub fn xtensa_get_intenable() -> u32 {
++    let v: u32;
++    unsafe { asm!("rsr.intenable {0}", out(reg) v) };
++    v
++}
++
++#[inline(always)]
++pub fn xtensa_set_intenable(v: u32) {
++    unsafe { asm!("wsr.intenable {0}", "rsync", in(reg) v) }
++}
++
++#[inline(always)]
++pub fn xtensa_get_ps() -> u32 {
++    let v: u32;
++    unsafe { asm!("rsr.ps {0}", out(reg) v) };
++    v
++}
++
++#[inline(always)]
++pub fn xtensa_set_ps(v: u32) {
++    unsafe { asm!("wsr.ps {0}", "rsync", in(reg) v) }
++}
++
++#[inline(always)]
++fn xtensa_get_interrupt() -> u32 {
++    let v: u32;
++    unsafe { asm!("rsr.interrupt {0}", out(reg) v) };
++    v
++}
++
++#[inline(always)]
++fn xtensa_clear_interrupt(mask: u32) {
++    unsafe { asm!("wsr.intclear {0}", "rsync", in(reg) mask) }
++}
++
++// PS register bits
++const PS_INTLEVEL_MASK: u32 = 0x0F;
++pub const PS_EXCM: u32 = 0x10;
++
++/****************************************************************
++ * Interrupt management
++ ****************************************************************/
++
++pub fn irq_register(irq_num: u32, handler: IrqHandler) {
++    if irq_num as usize >= MAX_IRQ_NUM {
++        return;
++    }
++    IRQ_TABLE.get()[irq_num as usize] = Some(handler);
++}
++
++// Register handler for DSP_INTC peripheral interrupt
++pub fn intc_register(intc_num: u32, handler: IrqHandler) {
++    if intc_num as usize >= MAX_INTC_NUM {
++        return;
++    }
++    INTC_TABLE.get()[intc_num as usize] = Some(handler);
++}
++
++// Enable a direct DSP core interrupt (in the Xtensa INTENABLE register)
++pub fn irq_enable_interrupt(irq_num: u32) {
++    if irq_num as usize >= MAX_IRQ_NUM {
++        return;
++    }
++    xtensa_set_intenable(xtensa_get_intenable() | bit(irq_num));
++}
++
++// Enable a DSP_INTC peripheral interrupt
++pub fn intc_enable(intc_num: u32) {
++    if intc_num as usize >= MAX_INTC_NUM {
++        return;
++    }
++    let reg_offset = if intc_num < 32 {
++        DSP_INTC_EN0
++    } else if intc_num < 64 {
++        DSP_INTC_EN1
++    } else {
++        DSP_INTC_EN2
++    };
++    reg32(DSP_INTC_BASE + reg_offset).or(bit(intc_num % 32));
++    // Make sure IRQ_INTC is enabled at the core level
++    irq_enable_interrupt(IRQ_INTC);
++}
++
++pub fn irq_global_enable() {
++    // Set interrupt level to 0 (enable all interrupts)
++    xtensa_set_ps(xtensa_get_ps() & !PS_INTLEVEL_MASK);
++}
++
++pub fn irq_global_disable() {
++    // Set interrupt level to max (disable all interrupts)
++    xtensa_set_ps(xtensa_get_ps() | PS_INTLEVEL_MASK);
++}
++
++pub fn hal_get_intenable() -> u32 {
++    xtensa_get_intenable()
++}
++
++pub fn hal_set_intenable(irqs: u32) {
++    xtensa_set_intenable(irqs)
++}
++
++/****************************************************************
++ * Interrupt dispatch
++ ****************************************************************/
++
++// Dispatch the DSP_INTC peripheral interrupts (IRQ_INTC)
++fn dispatch_intc_interrupts() {
++    // (four pending / enable registers, as the C code reads)
++    for r in 0..4 {
++        let pending = reg32(DSP_INTC_BASE + DSP_INTC_PEND0 + r * 4).read();
++        let enabled = reg32(DSP_INTC_BASE + DSP_INTC_EN0 + r * 4).read();
++        let mut pending = pending & enabled;
++        while pending != 0 {
++            let b = pending.trailing_zeros();
++            let intc_num = (r * 32 + b) as usize;
++            if intc_num < MAX_INTC_NUM {
++                if let Some(h) = INTC_TABLE.get()[intc_num] {
++                    h(intc_num as u32);
++                }
++            }
++            pending &= !bit(b);
++        }
++    }
++}
++
++// The interrupt handler of the vectors (_xt_int_enter in startup.rs)
++#[unsafe(no_mangle)]
++pub extern "C" fn hal_irq_dispatch() {
++    let mut pending = xtensa_get_interrupt() & xtensa_get_intenable();
++    while pending != 0 {
++        let irq = pending.trailing_zeros();
++        if irq == IRQ_INTC {
++            dispatch_intc_interrupts();
++        } else if let Some(h) = IRQ_TABLE.get()[irq as usize] {
++            h(irq);
++        }
++        // Clear this interrupt if it's edge-triggered (level-triggered
++        // interrupts must be cleared at the source)
++        xtensa_clear_interrupt(bit(irq));
++        pending &= !bit(irq);
++    }
++}
++
++/****************************************************************
++ * Initialization
++ ****************************************************************/
++
++pub fn hal_init() {
++    // (the handler tables start empty: .bss)
++    // Disable all Xtensa core interrupt inputs
++    xtensa_set_intenable(0);
++    xtensa_clear_interrupt(0xFFFFFFFF);
++
++    // Disable all peripheral interrupts initially
++    reg32(DSP_INTC_BASE + DSP_INTC_EN0).write(0);
++    reg32(DSP_INTC_BASE + DSP_INTC_EN1).write(0);
++    reg32(DSP_INTC_BASE + DSP_INTC_EN2).write(0);
++
++    reg32(DSP_INTC_BASE + DSP_INTC_MASK0).write(0);
++    reg32(DSP_INTC_BASE + DSP_INTC_MASK1).write(0);
++    reg32(DSP_INTC_BASE + DSP_INTC_MASK2).write(0);
++
++    // Clear all pending interrupts in DSP_INTC (writing 1 clears)
++    reg32(DSP_INTC_BASE + DSP_INTC_PEND0).write(0xFFFFFFFF);
++    reg32(DSP_INTC_BASE + DSP_INTC_PEND0 + 4).write(0xFFFFFFFF);
++    reg32(DSP_INTC_BASE + DSP_INTC_PEND0 + 8).write(0xFFFFFFFF);
++
++    irq_global_enable();
++}
++
++// Restart the firmware from _start (hal_restart)
++pub fn hal_restart() -> ! {
++    irq_global_disable();
++    super::watchdog::watchdog_stop();
++    unsafe {
++        // Clear INTENABLE to prevent any interrupt from firing; reset
++        // processor state, clear EXCM and INTLEVEL (needed if called from
++        // an interrupt handler), then jump to the reset code
++        asm!(
++            "wsr.intenable {zero}",
++            "wsr.intclear {ones}",
++            "rsync",
++            "wsr.ps {zero}",
++            "rsync",
++            "jx {start}",
++            zero = in(reg) 0u32,
++            ones = in(reg) 0xFFFFFFFFu32,
++            start = in(reg) super::super::startup::_start as *const () as usize,
++            options(noreturn),
++        )
++    }
++}
+diff --git a/firmware/src/hifi4/lib/mod.rs b/firmware/src/hifi4/lib/mod.rs
+new file mode 100644
+index 0000000..8a20a69
+--- /dev/null
++++ b/firmware/src/hifi4/lib/mod.rs
+@@ -0,0 +1,56 @@
++// lib/hifi4 (COSMOS 0006-Add-support-for-hifi4): the Allwinner R528 / T113
++// HiFi4 DSP hardware layer, hal.h's definitions and the driver files the
++// firmware calls (the others, spi / i2c / pwm / uart / timer / hstimer /
++// cache, have no caller in it: gc-sections drops them from the C image)
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++pub mod ccu;
++pub mod gpadc;
++pub mod gpio;
++pub mod hal_core;
++pub mod msgbox;
++pub mod watchdog;
++
++use crate::reg::Reg;
++
++// REG32(addr)
++#[inline(always)]
++pub fn reg32(addr: u32) -> &'static Reg<u32> {
++    unsafe { &*(addr as usize as *const Reg<u32>) }
++}
++
++pub const fn bit(n: u32) -> u32 {
++    1 << n
++}
++
++// An interrupt handler (irq_handler_t, without its arg: every caller
++// registers NULL)
++pub type IrqHandler = fn(u32);
++
++pub const CLK_FREQ_HOSC: u32 = 24000000;
++
++// Peripheral base addresses
++pub const PIO_BASE: u32 = 0x02000000;
++pub const GPADC_BASE: u32 = 0x02009000;
++pub const CCU_BASE: u32 = 0x02001000;
++pub const WDOG_BASE: u32 = 0x01700400;
++pub const MSGBOX_DSP_BASE: u32 = 0x01701000;
++pub const MSGBOX_ARM_BASE: u32 = 0x03003000;
++
++// Direct DSP core interrupts
++pub const IRQ_COMPARE0: u32 = 2;
++pub const IRQ_MSGBOX: u32 = 3;
++pub const IRQ_DSP_WDOG: u32 = 16;
++pub const IRQ_INTC: u32 = 20;
++pub const MAX_IRQ_NUM: usize = 32;
++pub const MAX_INTC_NUM: usize = 128;
++
++// DSP_INTC peripheral interrupts
++pub const INTC_GPIOB_NS: u32 = 70;
++pub const INTC_GPIOC_NS: u32 = 72;
++pub const INTC_GPIOD_NS: u32 = 74;
++pub const INTC_GPIOE_NS: u32 = 76;
++pub const INTC_GPIOF_NS: u32 = 78;
++pub const INTC_GPIOG_NS: u32 = 80;
+diff --git a/firmware/src/hifi4/lib/msgbox.rs b/firmware/src/hifi4/lib/msgbox.rs
+new file mode 100644
+index 0000000..d765a02
+--- /dev/null
++++ b/firmware/src/hifi4/lib/msgbox.rs
+@@ -0,0 +1,130 @@
++// Message Box driver for Allwinner R528/T113 HiFi4 DSP (lib/hifi4/msgbox.c)
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++//
++// Inter-processor communication between the ARM and DSP cores: 4 channels
++// of 8-deep 32-bit FIFOs, the DSP MSGBOX (local, receive) at 0x01701000
++// and the ARM one (remote, transmit) at 0x03003000.
++use super::ccu::ccu_msgbox_enable;
++use super::hal_core::{irq_enable_interrupt, irq_register};
++use super::{bit, reg32, IRQ_MSGBOX, MSGBOX_ARM_BASE, MSGBOX_DSP_BASE};
++use crate::ctr::Global;
++
++// (n = 0: the remote cpu is the ARM)
++const MSGBOX_RD_IRQ_EN: u32 = 0x0020;
++const MSGBOX_RD_IRQ_STATUS: u32 = 0x0024;
++const MSGBOX_WR_IRQ_EN: u32 = 0x0030;
++const MSGBOX_WR_IRQ_STATUS: u32 = 0x0034;
++const fn msgbox_fifo_status(p: u32) -> u32 {
++    0x0050 + p * 0x04
++}
++const fn msgbox_msg_status(p: u32) -> u32 {
++    0x0060 + p * 0x04
++}
++const fn msgbox_msg(p: u32) -> u32 {
++    0x0070 + p * 0x04
++}
++const fn msgbox_rd_irq_ch(p: u32) -> u32 {
++    bit(p * 2)
++}
++const fn msgbox_wr_irq_ch(p: u32) -> u32 {
++    bit(p * 2 + 1)
++}
++const MSGBOX_FIFO_FULL_FLAG: u32 = bit(0);
++const MSGBOX_MSG_NUM_MASK: u32 = 0x0F;
++pub const MSGBOX_NUM_CHANNELS: u32 = 4;
++
++// A received message's callback (msgbox_rx_callback_t, without its arg)
++pub type MsgboxRxCallback = fn(u8, u32);
++
++// (the tx callbacks: none is ever set)
++static RX_CALLBACKS: Global<[Option<MsgboxRxCallback>; MSGBOX_NUM_CHANNELS as usize]> = Global::new([None; MSGBOX_NUM_CHANNELS as usize]);
++
++fn local(offset: u32) -> &'static crate::reg::Reg<u32> {
++    reg32(MSGBOX_DSP_BASE + offset)
++}
++
++fn remote(offset: u32) -> &'static crate::reg::Reg<u32> {
++    reg32(MSGBOX_ARM_BASE + offset)
++}
++
++// Handles both RX (message received from ARM) and TX (FIFO has space)
++// interrupts
++fn msgbox_irq_handler(_irq: u32) {
++    let rd_status = local(MSGBOX_RD_IRQ_STATUS).read();
++    for ch in 0..MSGBOX_NUM_CHANNELS {
++        if rd_status & msgbox_rd_irq_ch(ch) != 0 {
++            // Clear interrupt by writing 1
++            local(MSGBOX_RD_IRQ_STATUS).write(msgbox_rd_irq_ch(ch));
++
++            // Read all available messages from this channel
++            let mut msg_count = local(msgbox_msg_status(ch)).read() & MSGBOX_MSG_NUM_MASK;
++            while msg_count > 0 {
++                let message = local(msgbox_msg(ch)).read();
++                if let Some(cb) = RX_CALLBACKS.get()[ch as usize] {
++                    cb(ch as u8, message);
++                }
++                msg_count = local(msgbox_msg_status(ch)).read() & MSGBOX_MSG_NUM_MASK;
++            }
++        }
++    }
++
++    let wr_status = remote(MSGBOX_WR_IRQ_STATUS).read();
++    for ch in 0..MSGBOX_NUM_CHANNELS {
++        if wr_status & msgbox_wr_irq_ch(ch) != 0 {
++            remote(MSGBOX_WR_IRQ_STATUS).write(msgbox_wr_irq_ch(ch));
++        }
++    }
++}
++
++pub fn msgbox_init() {
++    ccu_msgbox_enable();
++
++    *RX_CALLBACKS.get() = [None; MSGBOX_NUM_CHANNELS as usize];
++
++    // Disable all RX and TX interrupts
++    local(MSGBOX_RD_IRQ_EN).write(0);
++    remote(MSGBOX_WR_IRQ_EN).write(0);
++
++    // Clear any pending interrupts
++    local(MSGBOX_RD_IRQ_STATUS).write(0xFFFFFFFF);
++    remote(MSGBOX_WR_IRQ_STATUS).write(0xFFFFFFFF);
++
++    irq_register(IRQ_MSGBOX, msgbox_irq_handler);
++    irq_enable_interrupt(IRQ_MSGBOX);
++}
++
++pub fn msgbox_send(channel: u8, message: u32) -> i32 {
++    if channel as u32 >= MSGBOX_NUM_CHANNELS {
++        return -1;
++    }
++    if remote(msgbox_fifo_status(channel as u32)).read() & MSGBOX_FIFO_FULL_FLAG != 0 {
++        return -1; // FIFO full
++    }
++    remote(msgbox_msg(channel as u32)).write(message);
++    0
++}
++
++pub fn msgbox_recv_blocking(channel: u8) -> u32 {
++    if channel as u32 >= MSGBOX_NUM_CHANNELS {
++        return 0;
++    }
++    while local(msgbox_msg_status(channel as u32)).read() & MSGBOX_MSG_NUM_MASK == 0 {}
++    local(msgbox_msg(channel as u32)).read()
++}
++
++pub fn msgbox_set_rx_callback(channel: u8, callback: MsgboxRxCallback) {
++    if channel as u32 >= MSGBOX_NUM_CHANNELS {
++        return;
++    }
++    RX_CALLBACKS.get()[channel as usize] = Some(callback);
++}
++
++pub fn msgbox_enable_rx_irq(channel: u8) {
++    if channel as u32 >= MSGBOX_NUM_CHANNELS {
++        return;
++    }
++    local(MSGBOX_RD_IRQ_EN).or(msgbox_rd_irq_ch(channel as u32));
++}
+diff --git a/firmware/src/hifi4/lib/watchdog.rs b/firmware/src/hifi4/lib/watchdog.rs
+new file mode 100644
+index 0000000..9414cc1
+--- /dev/null
++++ b/firmware/src/hifi4/lib/watchdog.rs
+@@ -0,0 +1,80 @@
++// Watchdog driver for Allwinner R528/T113 HiFi4 DSP (lib/hifi4/watchdog.c)
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::hal_core::{irq_enable_interrupt, irq_register};
++use super::{bit, reg32, IrqHandler, IRQ_DSP_WDOG, WDOG_BASE};
++use crate::ctr::Global;
++
++const WDOG_IRQ_EN: u32 = 0x00;
++const WDOG_IRQ_STA: u32 = 0x04;
++const WDOG_CTRL: u32 = 0x10;
++const WDOG_CFG: u32 = 0x14;
++const WDOG_MODE: u32 = 0x18;
++
++const WDOG_CTRL_KEY: u32 = 0x0A57 << 1;
++const WDOG_CTRL_RESTART: u32 = bit(0);
++const WDOG_CFG_KEY: u32 = 0x16AA << 16;
++const WDOG_CFG_SYS_RESET: u32 = 1;
++const WDOG_CFG_IRQ_ONLY: u32 = 2;
++const WDOG_MODE_KEY: u32 = 0x16AA << 16;
++const WDOG_MODE_EN: u32 = bit(0);
++const fn wdog_mode_intv(n: u32) -> u32 {
++    n << 4
++}
++
++// (wdog_intv_t)
++pub const WDOG_INTV_1_SEC: u32 = 0x01;
++
++static WDOG_HANDLER: Global<Option<IrqHandler>> = Global::new(None);
++static WDOG_INTERVAL: Global<u32> = Global::new(0);
++
++fn wdog_write_reg(offset: u32, value: u32) {
++    reg32(WDOG_BASE + offset).write(value)
++}
++
++fn wdog_irq_handler(_irq: u32) {
++    // Clear interrupt
++    wdog_write_reg(WDOG_IRQ_STA, bit(0));
++    if let Some(h) = *WDOG_HANDLER.get() {
++        h(0);
++    }
++}
++
++pub fn watchdog_init(interval: u32, reset_on_timeout: bool) {
++    watchdog_stop();
++
++    *WDOG_INTERVAL.get() = interval;
++
++    // Configure mode: reset or IRQ only
++    if reset_on_timeout {
++        wdog_write_reg(WDOG_CFG, WDOG_CFG_KEY | WDOG_CFG_SYS_RESET);
++    } else {
++        wdog_write_reg(WDOG_CFG, WDOG_CFG_KEY | WDOG_CFG_IRQ_ONLY);
++        wdog_write_reg(WDOG_IRQ_EN, bit(0));
++        irq_register(IRQ_DSP_WDOG, wdog_irq_handler);
++        irq_enable_interrupt(IRQ_DSP_WDOG);
++    }
++
++    // Clear any pending interrupt
++    wdog_write_reg(WDOG_IRQ_STA, bit(0));
++}
++
++pub fn watchdog_start() {
++    wdog_write_reg(WDOG_MODE, WDOG_MODE_KEY | WDOG_MODE_EN | wdog_mode_intv(*WDOG_INTERVAL.get()));
++    // Initial kick to start countdown
++    watchdog_kick();
++}
++
++pub fn watchdog_stop() {
++    wdog_write_reg(WDOG_MODE, WDOG_MODE_KEY);
++}
++
++pub fn watchdog_kick() {
++    wdog_write_reg(WDOG_CTRL, WDOG_CTRL_KEY | WDOG_CTRL_RESTART);
++}
++
++pub fn watchdog_set_handler(handler: IrqHandler) {
++    *WDOG_HANDLER.get() = Some(handler);
++}
+diff --git a/firmware/src/hifi4/log.rs b/firmware/src/hifi4/log.rs
+new file mode 100644
+index 0000000..ab6f9de
+--- /dev/null
++++ b/firmware/src/hifi4/log.rs
+@@ -0,0 +1,62 @@
++// The remoteproc trace buffer (src/hifi4/log.c): boot diagnostics Linux
++// reads as a flat string up to the first null byte.
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use crate::ctr::Global;
++
++pub const TRACE_BUF_SIZE: usize = 4096;
++
++// (in SRAM A1, the resource table's trace entry; placed by hifi4.ld)
++#[unsafe(link_section = ".trace_buf")]
++#[unsafe(no_mangle)]
++pub static trace_buffer: Global<[u8; TRACE_BUF_SIZE]> = Global::new([0; TRACE_BUF_SIZE]);
++
++static TRACE_POS: Global<u32> = Global::new(0);
++
++// An argument of lprintf()'s formats: %s, %lu, %lx
++pub enum L<'a> {
++    S(&'a [u8]),
++    U(u32),
++    X(u32),
++}
++
++// lprintf(): the literal parts and the arguments in turn
++pub fn lprintf(parts: &[L]) -> usize {
++    let mut temp = [0u8; 256];
++    let mut out = 0;
++    for p in parts {
++        let mut digits = [0u8; 10];
++        let s: &[u8] = match *p {
++            L::S(s) => s,
++            L::U(v) | L::X(v) => {
++                let base = if matches!(p, L::U(_)) { 10 } else { 16 };
++                let mut v = v;
++                let mut i = digits.len();
++                loop {
++                    i -= 1;
++                    digits[i] = b"0123456789abcdef"[(v % base) as usize];
++                    v /= base;
++                    if v == 0 {
++                        break;
++                    }
++                }
++                &digits[i..]
++            }
++        };
++        temp[out..out + s.len()].copy_from_slice(s);
++        out += s.len();
++    }
++
++    // Append directly with no gaps; when full, stop writing
++    let pos = *TRACE_POS.get() as usize;
++    if pos + out >= TRACE_BUF_SIZE {
++        return 0;
++    }
++    let buf = trace_buffer.get();
++    buf[pos..pos + out].copy_from_slice(&temp[..out]);
++    *TRACE_POS.get() = (pos + out) as u32;
++    // Null-terminate so Linux knows where the content ends (the next
++    // write overwrites it)
++    buf[pos + out] = 0;
++    out
++}
+diff --git a/firmware/src/hifi4/main.rs b/firmware/src/hifi4/main.rs
+new file mode 100644
+index 0000000..8793a82
+--- /dev/null
++++ b/firmware/src/hifi4/main.rs
+@@ -0,0 +1,29 @@
++// Main entry point for hifi4 (src/hifi4/main.c, alloc.c).
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::lib::hal_core::hal_init;
++use crate::sched::sched_main;
++use core::ptr::addr_of_mut;
++
++unsafe extern "C" {
++    static mut _heap_start: u8;
++    static mut _heap_end: u8;
++}
++
++// Return the start of memory available for dynamic allocations
++pub fn dynmem_start() -> *mut u8 {
++    addr_of_mut!(_heap_start)
++}
++
++// Return the end of memory available for dynamic allocations
++pub fn dynmem_end() -> *mut u8 {
++    addr_of_mut!(_heap_end)
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn main() -> ! {
++    hal_init();
++    sched_main();
++}
+diff --git a/firmware/src/hifi4/mod.rs b/firmware/src/hifi4/mod.rs
+new file mode 100644
+index 0000000..31dc904
+--- /dev/null
++++ b/firmware/src/hifi4/mod.rs
+@@ -0,0 +1,37 @@
++// src/hifi4 (COSMOS 0006-Add-support-for-hifi4): the HiFi4 DSP of the
++// Allwinner R528 / T113, the Centauri Carbon's mainboard MCU, talking to
++// Linux over RPMsg. The board interface as re-exports.
++pub mod lib;
++
++#[cfg(CONFIG_HIFI4_MSGBOX)]
++pub mod com;
++pub mod gpio;
++pub mod gpio_h;
++pub mod irq;
++pub mod log;
++pub mod main;
++#[cfg(CONFIG_HIFI4_MSGBOX)]
++pub mod resource_table;
++#[cfg(CONFIG_HIFI4_MSGBOX)]
++pub mod rpmsg;
++#[cfg(CONFIG_HIFI4_MSGBOX)]
++pub mod rpmsg_transport;
++pub mod startup;
++pub mod timer;
++#[cfg(CONFIG_HIFI4_WATCHDOG)]
++pub mod watchdog;
++
++#[cfg(CONFIG_HIFI4_MSGBOX)]
++pub use com::console_sendf;
++pub use crate::generic::crc16_ccitt::crc16_ccitt;
++pub use crate::generic::timer_irq::{timer_from_us, timer_is_before};
++pub use gpio::{
++    gpio_adc_cancel_sample, gpio_adc_read, gpio_adc_sample, gpio_adc_setup, gpio_in_read, gpio_in_reset, gpio_in_setup, gpio_out_reset,
++    gpio_out_setup, gpio_out_toggle, gpio_out_toggle_noirq, gpio_out_write, gpio_pwm_setup, gpio_pwm_write, spi_prepare, spi_setup,
++    spi_transfer,
++};
++pub use gpio_h::{GpioAdc, GpioIn, GpioOut, GpioOutVal, GpioPullUp, GpioPwm, I2cConfig, SpiConfig};
++pub use irq::{irq_disable, irq_enable, irq_poll, irq_restore, irq_save, irq_wait, IrqStatus};
++pub use main::{dynmem_end, dynmem_start};
++pub use timer::{timer_kick, timer_read_time};
++pub use crate::generic::pgm;
+diff --git a/firmware/src/hifi4/resource_table.rs b/firmware/src/hifi4/resource_table.rs
+new file mode 100644
+index 0000000..4025e43
+--- /dev/null
++++ b/firmware/src/hifi4/resource_table.rs
+@@ -0,0 +1,99 @@
++// The remoteproc resource table (src/hifi4/resource_table.c): the RPMsg
++// virtio device with its two vrings, and the trace buffer. Linux's ELF
++// loader finds it by its section.
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::log::{trace_buffer, TRACE_BUF_SIZE};
++use super::rpmsg::{RPMSG_NUM_BUFS, RPMSG_VRING_ALIGN, VRING_RX_ADDR, VRING_TX_ADDR};
++use core::mem::offset_of;
++
++const RSC_TRACE: u32 = 2;
++const RSC_VDEV: u32 = 3;
++const VIRTIO_ID_RPMSG: u32 = 7;
++
++#[repr(C)]
++struct FwRscVdevVring {
++    da: u32,
++    align: u32,
++    num: u32,
++    notifyid: u32,
++    reserved: u32,
++}
++
++#[repr(C)]
++struct FwRscVdev {
++    type_: u32,
++    id: u32,
++    notifyid: u32,
++    dfeatures: u32,
++    gfeatures: u32,
++    config_len: u32,
++    status: u8,
++    num_of_vrings: u8,
++    reserved: [u8; 2],
++    vring: [FwRscVdevVring; 2],
++}
++
++#[repr(C)]
++struct FwRscTrace {
++    type_: u32,
++    // (the trace buffer's address: a pointer, 32 bits here)
++    da: *const u8,
++    len: u32,
++    reserved: u32,
++    name: [u8; 32],
++}
++
++#[repr(C)]
++pub struct ResourceTable {
++    ver: u32,
++    num: u32,
++    reserved: [u32; 2],
++    offset: [u32; 2],
++    rpmsg_vdev: FwRscVdev,
++    trace: FwRscTrace,
++}
++
++unsafe impl Sync for ResourceTable {}
++
++const fn name32(s: &[u8]) -> [u8; 32] {
++    let mut n = [0; 32];
++    let mut i = 0;
++    while i < s.len() {
++        n[i] = s[i];
++        i += 1;
++    }
++    n
++}
++
++#[unsafe(link_section = ".resource_table")]
++#[unsafe(no_mangle)]
++#[used]
++pub static resource_table: ResourceTable = ResourceTable {
++    ver: 1,
++    num: 2,
++    reserved: [0; 2],
++    offset: [offset_of!(ResourceTable, rpmsg_vdev) as u32, offset_of!(ResourceTable, trace) as u32],
++    rpmsg_vdev: FwRscVdev {
++        type_: RSC_VDEV,
++        id: VIRTIO_ID_RPMSG,
++        notifyid: 0,
++        dfeatures: 1, // VIRTIO_RPMSG_F_NS
++        gfeatures: 0,
++        config_len: 0,
++        status: 0,
++        num_of_vrings: 2,
++        reserved: [0; 2],
++        vring: [
++            FwRscVdevVring { da: VRING_TX_ADDR, align: RPMSG_VRING_ALIGN, num: RPMSG_NUM_BUFS, notifyid: 0, reserved: 0 },
++            FwRscVdevVring { da: VRING_RX_ADDR, align: RPMSG_VRING_ALIGN, num: RPMSG_NUM_BUFS, notifyid: 1, reserved: 0 },
++        ],
++    },
++    trace: FwRscTrace {
++        type_: RSC_TRACE,
++        da: trace_buffer.ptr() as *const u8,
++        len: TRACE_BUF_SIZE as u32,
++        reserved: 0,
++        name: name32(b"dsp_trace"),
++    },
++};
+diff --git a/firmware/src/hifi4/rpmsg.rs b/firmware/src/hifi4/rpmsg.rs
+new file mode 100644
+index 0000000..88b4509
+--- /dev/null
++++ b/firmware/src/hifi4/rpmsg.rs
+@@ -0,0 +1,325 @@
++// Minimal RPMsg/virtio implementation for bare-metal HiFi4 DSP
++// (src/hifi4/rpmsg.c, rpmsg.h, virtio_vring.h).
++//
++// Just enough of the virtio vring protocol and RPMsg framing to talk to
++// Linux's virtio_rpmsg_bus driver. The vrings and buffers live in SRAM A1,
++// uncached on both sides:
++//   TX (vring0): take an empty buffer Linux posted on avail, write a
++//     message into it, return it on used, kick Linux
++//   RX (vring1): take Linux's messages from avail, return the buffers on
++//     used, kick Linux
++//
++// Copyright (C) 2026  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::log::{lprintf, L};
++use super::rpmsg_transport::rpmsg_kick;
++use crate::ctr::Global;
++use core::arch::asm;
++use core::ptr::{read_volatile, write_volatile};
++
++pub const RPMSG_NAME_SIZE: usize = 32;
++pub const RPMSG_BUF_SIZE: u32 = 512;
++const RPMSG_HDR_SIZE: u32 = 16;
++const RPMSG_DATA_SIZE: u32 = RPMSG_BUF_SIZE - RPMSG_HDR_SIZE;
++pub const RPMSG_ADDR_ANY: u32 = 0xFFFFFFFF;
++const RPMSG_NS_ADDR: u32 = 53;
++const RPMSG_NS_CREATE: u32 = 0;
++const RPMSG_MAX_ENDPOINTS: usize = 4;
++
++pub const RPMSG_VRING_ALIGN: u32 = 256;
++pub const RPMSG_NUM_BUFS: u32 = 16;
++pub const VRING_TX_ADDR: u32 = 0x00020000;
++pub const VRING_RX_ADDR: u32 = 0x00021000;
++
++// Endpoint receive callback: the source address and the payload
++pub type RpmsgRxCb = fn(u32, &[u8]);
++
++// An RPMsg endpoint
++pub struct RpmsgEndpoint {
++    pub addr: u32,
++    pub dst: u32,
++    name: [u8; RPMSG_NAME_SIZE],
++    cb: Option<RpmsgRxCb>,
++    active: bool,
++}
++
++impl RpmsgEndpoint {
++    const fn new() -> Self {
++        RpmsgEndpoint { addr: 0, dst: 0, name: [0; RPMSG_NAME_SIZE], cb: None, active: false }
++    }
++    // the name up to its null byte
++    fn name(&self) -> &[u8] {
++        let n = self.name.iter().position(|&c| c == 0).unwrap_or(RPMSG_NAME_SIZE);
++        &self.name[..n]
++    }
++}
++
++// A vring in shared memory: the descriptor table (16 byte entries: addr
++// u64, len u32, flags u16, next u16), the available ring (flags u16, idx
++// u16, ring u16[num]) and, aligned, the used ring (flags u16, idx u16,
++// ring {id u32, len u32}[num])
++#[derive(Clone, Copy)]
++struct Vring {
++    num: u32,
++    desc: u32,
++    avail: u32,
++    used: u32,
++}
++
++impl Vring {
++    const fn empty() -> Self {
++        Vring { num: 0, desc: 0, avail: 0, used: 0 }
++    }
++    fn init(num: u32, base: u32, align: u32) -> Self {
++        // the available ring and its used_event
++        let avail_size = 4 + 2 * num + 2;
++        let used_offset = (16 * num + avail_size + align - 1) & !(align - 1);
++        Vring { num, desc: base, avail: base + 16 * num, used: base + used_offset }
++    }
++    fn avail_idx(&self) -> u16 {
++        unsafe { read_volatile((self.avail + 2) as usize as *const u16) }
++    }
++    fn avail_ring(&self, i: u32) -> u16 {
++        unsafe { read_volatile((self.avail + 4 + 2 * i) as usize as *const u16) }
++    }
++    fn used_idx(&self) -> u16 {
++        unsafe { read_volatile((self.used + 2) as usize as *const u16) }
++    }
++    // the buffer of a descriptor (the low word of its 64bit address)
++    fn desc_addr(&self, i: u32) -> *mut u8 {
++        unsafe { read_volatile((self.desc + 16 * i) as usize as *const u32) as usize as *mut u8 }
++    }
++}
++
++struct State {
++    rx_vring: Vring,
++    rx_last_avail_idx: u16,
++    tx_vring: Vring,
++    tx_last_avail_idx: u16,
++    endpoints: [RpmsgEndpoint; RPMSG_MAX_ENDPOINTS],
++    rpmsg_ready: bool,
++    // endpoints waiting to be announced to Linux (deferred until Linux has
++    // populated the TX vring)
++    pending_announcements: bool,
++}
++
++static STATE: Global<State> = Global::new(State {
++    rx_vring: Vring::empty(),
++    rx_last_avail_idx: 0,
++    tx_vring: Vring::empty(),
++    tx_last_avail_idx: 0,
++    endpoints: [const { RpmsgEndpoint::new() }; RPMSG_MAX_ENDPOINTS],
++    rpmsg_ready: false,
++    pending_announcements: false,
++});
++
++// Memory barrier: the other processor sees our writes in order
++#[inline(always)]
++fn mb() {
++    unsafe { asm!("memw") }
++}
++
++// The next available descriptor index of a vring, or -1
++fn vring_get_avail(vr: &Vring, last_avail_idx: &mut u16) -> i32 {
++    mb();
++    if *last_avail_idx == vr.avail_idx() {
++        return -1; // No new buffers
++    }
++    let desc_idx = vr.avail_ring(*last_avail_idx as u32 % vr.num);
++    *last_avail_idx = last_avail_idx.wrapping_add(1);
++    desc_idx as i32
++}
++
++// Return a descriptor to the other side on the used ring
++fn vring_put_used(vr: &Vring, desc_idx: u16, len: u32) {
++    let used_idx = vr.used_idx() as u32 % vr.num;
++    let elem = (vr.used + 4 + 8 * used_idx) as usize as *mut u32;
++    unsafe {
++        write_volatile(elem, desc_idx as u32);
++        write_volatile(elem.add(1), len);
++    }
++    mb();
++    unsafe { write_volatile((vr.used + 2) as usize as *mut u16, vr.used_idx().wrapping_add(1)) };
++    mb();
++}
++
++fn find_endpoint(st: &mut State, addr: u32) -> Option<&mut RpmsgEndpoint> {
++    st.endpoints.iter_mut().find(|e| e.active && e.addr == addr)
++}
++
++// Send a name service announcement to Linux: the endpoint's name, address
++// and flags
++fn rpmsg_ns_announce(addr: u32, name: &[u8; RPMSG_NAME_SIZE], flags: u32) -> i32 {
++    let mut ns_msg = [0u8; RPMSG_NAME_SIZE + 8];
++    ns_msg[..RPMSG_NAME_SIZE].copy_from_slice(name);
++    ns_msg[RPMSG_NAME_SIZE..RPMSG_NAME_SIZE + 4].copy_from_slice(&addr.to_le_bytes());
++    ns_msg[RPMSG_NAME_SIZE + 4..].copy_from_slice(&flags.to_le_bytes());
++    rpmsg_send(addr, RPMSG_NS_ADDR, &ns_msg)
++}
++
++pub fn rpmsg_init(tx_vring_addr: u32, rx_vring_addr: u32, num_bufs: u32) {
++    let st = STATE.get();
++    st.tx_vring = Vring::init(num_bufs, tx_vring_addr, RPMSG_VRING_ALIGN);
++    st.tx_last_avail_idx = 0;
++    st.rx_vring = Vring::init(num_bufs, rx_vring_addr, RPMSG_VRING_ALIGN);
++    st.rx_last_avail_idx = 0;
++    st.endpoints = [const { RpmsgEndpoint::new() }; RPMSG_MAX_ENDPOINTS];
++    st.rpmsg_ready = true;
++
++    lprintf(&[
++        L::S(b"rpmsg: initialized, tx_vring@0x"),
++        L::X(tx_vring_addr),
++        L::S(b" rx_vring@0x"),
++        L::X(rx_vring_addr),
++        L::S(b" num="),
++        L::U(num_bufs),
++        L::S(b"\n"),
++    ]);
++}
++
++// Create an endpoint (announced to Linux by rpmsg_process(): Linux has not
++// populated the TX vring yet)
++pub fn rpmsg_create_ept(name: &[u8], addr: u32, cb: RpmsgRxCb) -> Option<&'static mut RpmsgEndpoint> {
++    let st = STATE.get();
++    let Some(ept) = st.endpoints.iter_mut().find(|e| !e.active) else {
++        lprintf(&[L::S(b"rpmsg: no free endpoint slots\n")]);
++        return None;
++    };
++    *ept = RpmsgEndpoint::new();
++    ept.addr = addr;
++    ept.dst = RPMSG_ADDR_ANY;
++    ept.cb = Some(cb);
++    ept.active = true;
++    ept.name[..name.len()].copy_from_slice(name);
++
++    lprintf(&[L::S(b"rpmsg: created endpoint \""), L::S(name), L::S(b"\" addr="), L::U(addr), L::S(b"\n")]);
++
++    st.pending_announcements = true;
++    Some(ept)
++}
++
++// Send a message from a local endpoint address to a remote one
++fn rpmsg_send(src: u32, dst: u32, data: &[u8]) -> i32 {
++    let st = STATE.get();
++    if !st.rpmsg_ready {
++        return -1;
++    }
++    let len = data.len() as u32;
++    if len > RPMSG_DATA_SIZE {
++        return -2;
++    }
++
++    // An empty buffer from the TX vring's available ring
++    let desc_idx = vring_get_avail(&st.tx_vring, &mut st.tx_last_avail_idx);
++    if desc_idx < 0 {
++        lprintf(&[L::S(b"rpmsg: TX no available buffers\n")]);
++        return -3;
++    }
++
++    // The message: its header (src, dst, reserved, len u16, flags u16),
++    // then the payload
++    let hdr = st.tx_vring.desc_addr(desc_idx as u32);
++    unsafe {
++        write_volatile(hdr as *mut u32, src);
++        write_volatile(hdr.add(4) as *mut u32, dst);
++        write_volatile(hdr.add(8) as *mut u32, 0);
++        write_volatile(hdr.add(12) as *mut u16, len as u16);
++        write_volatile(hdr.add(14) as *mut u16, 0);
++        core::ptr::copy_nonoverlapping(data.as_ptr(), hdr.add(RPMSG_HDR_SIZE as usize), data.len());
++    }
++    mb();
++
++    // Return the filled buffer via the used ring, kick Linux (vring0)
++    vring_put_used(&st.tx_vring, desc_idx as u16, RPMSG_HDR_SIZE + len);
++    rpmsg_kick(0);
++    0
++}
++
++// Send a message to the endpoint's remote address (set when Linux first
++// sends to it)
++pub fn rpmsg_sendto(ept: &RpmsgEndpoint, data: &[u8]) -> i32 {
++    if ept.dst == RPMSG_ADDR_ANY {
++        lprintf(&[L::S(b"rpmsg: endpoint \""), L::S(ept.name()), L::S(b"\" has no remote dst yet\n")]);
++        return -4;
++    }
++    rpmsg_send(ept.addr, ept.dst, data)
++}
++
++// Process incoming messages (from the MSGBOX interrupt): the deferred name
++// service announcements, then the RX vring's messages to their endpoints
++pub fn rpmsg_process() -> i32 {
++    let st = STATE.get();
++    if !st.rpmsg_ready {
++        return 0;
++    }
++
++    if st.pending_announcements {
++        for i in 0..RPMSG_MAX_ENDPOINTS {
++            if !st.endpoints[i].active {
++                continue;
++            }
++            let (addr, name) = (st.endpoints[i].addr, st.endpoints[i].name);
++            let n = &name[..name.iter().position(|&c| c == 0).unwrap_or(RPMSG_NAME_SIZE)];
++            if rpmsg_ns_announce(addr, &name, RPMSG_NS_CREATE) == 0 {
++                lprintf(&[L::S(b"rpmsg: announced \""), L::S(n), L::S(b"\" to Linux\n")]);
++            } else {
++                lprintf(&[L::S(b"rpmsg: failed to announce \""), L::S(n), L::S(b"\"\n")]);
++            }
++        }
++        st.pending_announcements = false;
++    }
++
++    let mut processed = 0;
++    loop {
++        let desc_idx = vring_get_avail(&st.rx_vring, &mut st.rx_last_avail_idx);
++        if desc_idx < 0 {
++            break;
++        }
++        let hdr = st.rx_vring.desc_addr(desc_idx as u32);
++        let (src, dst, len) = unsafe {
++            (read_volatile(hdr as *const u32), read_volatile(hdr.add(4) as *const u32), read_volatile(hdr.add(12) as *const u16))
++        };
++
++        if let Some(ept) = find_endpoint(st, dst) {
++            // The remote address for rpmsg_sendto()
++            if ept.dst == RPMSG_ADDR_ANY {
++                ept.dst = src;
++            }
++            if let Some(cb) = ept.cb {
++                cb(src, unsafe { core::slice::from_raw_parts(hdr.add(RPMSG_HDR_SIZE as usize), len as usize) });
++            }
++        } else {
++            lprintf(&[L::S(b"rpmsg: no endpoint for dst="), L::U(dst), L::S(b" (from src="), L::U(src), L::S(b")\n")]);
++        }
++
++        // Return the buffer to Linux via the used ring
++        vring_put_used(&st.rx_vring, desc_idx as u16, RPMSG_BUF_SIZE);
++        processed += 1;
++    }
++
++    // Kick Linux: buffers returned (vring1)
++    if processed > 0 {
++        rpmsg_kick(1);
++    }
++    processed
++}
++
++// The TX vring's available index: how many empty buffers Linux has posted
++// (0 on a cold boot)
++pub fn rpmsg_tx_avail_idx() -> u16 {
++    mb();
++    STATE.get().tx_vring.avail_idx()
++}
++
++// After a warm restart: match Linux's current position
++pub fn rpmsg_sync_indices() {
++    mb();
++    let st = STATE.get();
++    st.rx_last_avail_idx = st.rx_vring.avail_idx();
++    st.tx_last_avail_idx = st.tx_vring.used_idx();
++}
++
++pub fn rpmsg_clear_pending_announcements() {
++    STATE.get().pending_announcements = false;
++}
+diff --git a/firmware/src/hifi4/rpmsg_transport.rs b/firmware/src/hifi4/rpmsg_transport.rs
+new file mode 100644
+index 0000000..bd9614d
+--- /dev/null
++++ b/firmware/src/hifi4/rpmsg_transport.rs
+@@ -0,0 +1,73 @@
++// RPMsg transport integration for HiFi4 DSP: the MSGBOX hardware kicks
++// and the RPMsg virtio layer (src/hifi4/rpmsg_transport.c).
++//
++// Copyright (C) 2026  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::com::{com_set_endpoint, rpmsg_notify_rx};
++use super::lib::msgbox::{msgbox_enable_rx_irq, msgbox_init, msgbox_recv_blocking, msgbox_send, msgbox_set_rx_callback};
++use super::log::{lprintf, L};
++use super::rpmsg::{
++    rpmsg_clear_pending_announcements, rpmsg_create_ept, rpmsg_init, rpmsg_process, rpmsg_sync_indices, rpmsg_tx_avail_idx, RPMSG_NUM_BUFS,
++    VRING_RX_ADDR, VRING_TX_ADDR,
++};
++use crate::decl_init;
++use crate::sched::R;
++
++// The MSGBOX channels of the RPMsg kicks (the mboxes of the device tree)
++const MSGBOX_RPMSG_RX_CHANNEL: u8 = 0;
++const MSGBOX_RPMSG_TX_CHANNEL: u8 = 0;
++
++// Notify Linux that we've updated a vring (0: TX, 1: RX)
++pub fn rpmsg_kick(vq_id: u32) {
++    msgbox_send(MSGBOX_RPMSG_TX_CHANNEL, vq_id);
++}
++
++// Linux kicked us: process its messages
++fn rpmsg_msgbox_rx_callback(_channel: u8, _message: u32) {
++    rpmsg_process();
++}
++
++// Linux's messages to the "rpmsg-tty" endpoint: the command receive
++// pipeline
++fn klipper_rpmsg_cb(_src: u32, data: &[u8]) {
++    rpmsg_notify_rx(data);
++}
++
++pub fn rpmsg_transport_init() -> R {
++    lprintf(&[L::S(b"rpmsg: initializing transport\n")]);
++
++    msgbox_init();
++    rpmsg_init(VRING_TX_ADDR, VRING_RX_ADDR, RPMSG_NUM_BUFS);
++
++    // On a cold boot the TX vring has no buffers yet (avail->idx == 0);
++    // after a soft reset Linux never tore it down
++    let cold_boot = rpmsg_tx_avail_idx() == 0;
++    if cold_boot {
++        // Wait for Linux to finish virtio setup
++        msgbox_recv_blocking(MSGBOX_RPMSG_RX_CHANNEL);
++    } else {
++        rpmsg_sync_indices();
++    }
++
++    // Create the endpoint before enabling irqs
++    let Some(ept) = rpmsg_create_ept(b"rpmsg-tty", 1024, klipper_rpmsg_cb) else {
++        return Ok(());
++    };
++    if cold_boot {
++        com_set_endpoint(ept);
++        // The name service announcement and any pending messages, before
++        // the MSGBOX irq is enabled
++        rpmsg_process();
++    } else {
++        // Warm restart: Linux already knows us, at the address it assigned
++        ept.dst = 0x400;
++        com_set_endpoint(ept);
++        rpmsg_clear_pending_announcements();
++    }
++
++    msgbox_set_rx_callback(MSGBOX_RPMSG_RX_CHANNEL, rpmsg_msgbox_rx_callback);
++    msgbox_enable_rx_irq(MSGBOX_RPMSG_RX_CHANNEL);
++    Ok(())
++}
++decl_init!(rpmsg_transport_init);
+diff --git a/firmware/src/hifi4/startup.rs b/firmware/src/hifi4/startup.rs
+new file mode 100644
+index 0000000..6e1b982
+--- /dev/null
++++ b/firmware/src/hifi4/startup.rs
+@@ -0,0 +1,352 @@
++// The reset code and the interrupt / exception vectors of the HiFi4 DSP
++// (lib/hifi4/startup.S, lib/hifi4/vectors.S), the call0 ABI. The literals
++// are explicit l32r words: hifi4.ld places every literal section before
++// the code.
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use crate::sched::{sched_main_loop, Shutdown};
++use core::arch::{asm, global_asm};
++
++unsafe extern "C" {
++    pub fn _start();
++    static __stack: u8;
++}
++
++global_asm!(
++    // Reset vector: jump to _start
++    ".section .ResetVector.literal, \"a\"",
++    ".align 4",
++    ".Lstart_addr:",
++    ".word _start",
++    ".section .ResetVector.text, \"ax\"",
++    ".global _ResetVector",
++    ".align 4",
++    "_ResetVector:",
++    "l32r a0, .Lstart_addr",
++    "jx a0",
++    // _start's literals
++    ".section .literal.hifi4_start, \"ax\"",
++    ".align 4",
++    ".Lvecbase: .word _memmap_vecbase_reset",
++    ".Lstack: .word __stack",
++    ".Lrodata_lma: .word _rodata_lma",
++    ".Lrodata_start: .word _rodata_start",
++    ".Lrodata_end: .word _rodata_end",
++    ".Ldata_lma: .word _data_lma",
++    ".Ldata_start: .word _data_start",
++    ".Ldata_end: .word _data_end",
++    ".Lbss_start: .word _bss_start",
++    ".Lbss_end: .word _bss_end",
++    ".Lhang_addr: .word .Lhang",
++    ".section .text.hifi4_start, \"ax\"",
++    ".align 4",
++    ".global _start",
++    ".type _start, @function",
++    "_start:",
++    // Initialize PS: PS.WOE=0 (no windowed calls), INTLEVEL=0, EXCM=0
++    "movi a2, 0",
++    "wsr.ps a2",
++    "rsync",
++    // Set interrupt vector base
++    "l32r a2, .Lvecbase",
++    "wsr.vecbase a2",
++    "rsync",
++    // Initialize stack pointer
++    "l32r a1, .Lstack",
++    // Copy .rodata and .data from IRAM (LMA) to DRAM0 (VMA): IRAM only
++    // supports 32-bit aligned access, so word reads and writes
++    "l32r a2, .Lrodata_lma",
++    "l32r a3, .Lrodata_start",
++    "l32r a4, .Lrodata_end",
++    ".Lrodata_copy:",
++    "bgeu a3, a4, .Lrodata_done",
++    "l32i a5, a2, 0",
++    "s32i a5, a3, 0",
++    "addi a2, a2, 4",
++    "addi a3, a3, 4",
++    "j .Lrodata_copy",
++    ".Lrodata_done:",
++    "l32r a2, .Ldata_lma",
++    "l32r a3, .Ldata_start",
++    "l32r a4, .Ldata_end",
++    ".Ldata_copy:",
++    "bgeu a3, a4, .Ldata_done",
++    "l32i a5, a2, 0",
++    "s32i a5, a3, 0",
++    "addi a2, a2, 4",
++    "addi a3, a3, 4",
++    "j .Ldata_copy",
++    ".Ldata_done:",
++    // Clear BSS before calling main
++    "l32r a2, .Lbss_start",
++    "l32r a3, .Lbss_end",
++    "movi a4, 0",
++    ".Lbss_loop:",
++    "bgeu a2, a3, .Lbss_done",
++    "s32i a4, a2, 0",
++    "addi a2, a2, 4",
++    "j .Lbss_loop",
++    ".Lbss_done:",
++    // Return address: the hang loop, in case main returns
++    "l32r a0, .Lhang_addr",
++    "call0 main",
++    // (a call0 target: 4-byte aligned, which GNU as does by itself)
++    ".align 4",
++    ".Lhang:",
++    "call0 .Lhang",
++    // The shared interrupt entry: called from the level vectors with a0 =
++    // the interrupt level and the interrupted a0 in EXCSAVEn
++    ".set FRAME_PC, 0",
++    ".set FRAME_PS, 4",
++    ".set FRAME_A0, 8",
++    ".set FRAME_A2, 16",
++    ".set FRAME_A3, 20",
++    ".set FRAME_A4, 24",
++    ".set FRAME_A5, 28",
++    ".set FRAME_A6, 32",
++    ".set FRAME_A7, 36",
++    ".set FRAME_A8, 40",
++    ".set FRAME_A9, 44",
++    ".set FRAME_A10, 48",
++    ".set FRAME_A11, 52",
++    ".set FRAME_A12, 56",
++    ".set FRAME_A13, 60",
++    ".set FRAME_A14, 64",
++    ".set FRAME_A15, 68",
++    ".set FRAME_SAR, 72",
++    ".set FRAME_LEVEL, 76",
++    ".set FRAME_LBEG, 80",
++    ".set FRAME_LEND, 84",
++    ".set FRAME_LCOUNT, 88",
++    ".set FRAME_SIZE, 96",
++    ".section ._xt_int_enter.literal, \"a\"",
++    ".align 4",
++    ".L_handler:",
++    ".word hal_irq_dispatch",
++    ".section .text._xt_int_enter, \"ax\"",
++    ".global _xt_int_enter",
++    ".type _xt_int_enter, @function",
++    ".align 4",
++    "_xt_int_enter:",
++    "addi a1, a1, -FRAME_SIZE",
++    "s32i a0, a1, FRAME_LEVEL",
++    "s32i a2, a1, FRAME_A2",
++    "s32i a3, a1, FRAME_A3",
++    "s32i a4, a1, FRAME_A4",
++    "s32i a5, a1, FRAME_A5",
++    "s32i a6, a1, FRAME_A6",
++    "s32i a7, a1, FRAME_A7",
++    "s32i a8, a1, FRAME_A8",
++    "s32i a9, a1, FRAME_A9",
++    "s32i a10, a1, FRAME_A10",
++    "s32i a11, a1, FRAME_A11",
++    "s32i a12, a1, FRAME_A12",
++    "s32i a13, a1, FRAME_A13",
++    "s32i a14, a1, FRAME_A14",
++    "s32i a15, a1, FRAME_A15",
++    "rsr a2, sar",
++    "s32i a2, a1, FRAME_SAR",
++    "rsr a2, lbeg",
++    "s32i a2, a1, FRAME_LBEG",
++    "rsr a2, lend",
++    "s32i a2, a1, FRAME_LEND",
++    "rsr a2, lcount",
++    "s32i a2, a1, FRAME_LCOUNT",
++    "beqi a0, 1, .Llevel1_save",
++    "beqi a0, 2, .Llevel2_save",
++    "beqi a0, 3, .Llevel3_save",
++    "beqi a0, 4, .Llevel4_save",
++    "beqi a0, 5, .Llevel5_save",
++    "j .Lsave_done",
++    ".Llevel1_save:",
++    "rsr a2, excsave1",
++    "s32i a2, a1, FRAME_A0",
++    "rsr a2, epc1",
++    "s32i a2, a1, FRAME_PC",
++    "j .Lsave_done",
++    ".Llevel2_save:",
++    "rsr a2, excsave2",
++    "s32i a2, a1, FRAME_A0",
++    "rsr a2, epc2",
++    "s32i a2, a1, FRAME_PC",
++    "rsr a2, eps2",
++    "s32i a2, a1, FRAME_PS",
++    "j .Lsave_done",
++    ".Llevel3_save:",
++    "rsr a2, excsave3",
++    "s32i a2, a1, FRAME_A0",
++    "rsr a2, epc3",
++    "s32i a2, a1, FRAME_PC",
++    "rsr a2, eps3",
++    "s32i a2, a1, FRAME_PS",
++    "j .Lsave_done",
++    ".Llevel4_save:",
++    "rsr a2, excsave4",
++    "s32i a2, a1, FRAME_A0",
++    "rsr a2, epc4",
++    "s32i a2, a1, FRAME_PC",
++    "rsr a2, eps4",
++    "s32i a2, a1, FRAME_PS",
++    "j .Lsave_done",
++    ".Llevel5_save:",
++    "rsr a2, excsave5",
++    "s32i a2, a1, FRAME_A0",
++    "rsr a2, epc5",
++    "s32i a2, a1, FRAME_PC",
++    "rsr a2, eps5",
++    "s32i a2, a1, FRAME_PS",
++    ".Lsave_done:",
++    "rsync",
++    "memw",
++    // Call the dispatcher with the level as argument
++    "l32i a2, a1, FRAME_LEVEL",
++    "l32r a0, .L_handler",
++    "callx0 a0",
++    "memw",
++    // Restore all registers
++    "l32i a2, a1, FRAME_LCOUNT",
++    "wsr a2, lcount",
++    "l32i a2, a1, FRAME_LBEG",
++    "wsr a2, lbeg",
++    "l32i a2, a1, FRAME_LEND",
++    "wsr a2, lend",
++    "l32i a2, a1, FRAME_SAR",
++    "wsr a2, sar",
++    "isync",
++    "l32i a15, a1, FRAME_A15",
++    "l32i a14, a1, FRAME_A14",
++    "l32i a13, a1, FRAME_A13",
++    "l32i a12, a1, FRAME_A12",
++    "l32i a11, a1, FRAME_A11",
++    "l32i a10, a1, FRAME_A10",
++    "l32i a9, a1, FRAME_A9",
++    "l32i a8, a1, FRAME_A8",
++    "l32i a7, a1, FRAME_A7",
++    "l32i a6, a1, FRAME_A6",
++    "l32i a5, a1, FRAME_A5",
++    "l32i a4, a1, FRAME_A4",
++    "l32i a3, a1, FRAME_A3",
++    "l32i a2, a1, FRAME_A2",
++    "l32i a0, a1, FRAME_A0",
++    "l32i a0, a1, FRAME_LEVEL",
++    "beqi a0, 1, .Llevel1_restore",
++    "beqi a0, 2, .Llevel2_restore",
++    "beqi a0, 3, .Llevel3_restore",
++    "beqi a0, 4, .Llevel4_restore",
++    "beqi a0, 5, .Llevel5_restore",
++    "rfe",
++    ".Llevel1_restore:",
++    "l32i a0, a1, FRAME_PC",
++    "wsr a0, epc1",
++    "addi a1, a1, FRAME_SIZE",
++    "rsr a0, excsave1",
++    "rfe",
++    ".Llevel2_restore:",
++    "l32i a0, a1, FRAME_PC",
++    "wsr a0, epc2",
++    "l32i a0, a1, FRAME_PS",
++    "wsr a0, eps2",
++    "addi a1, a1, FRAME_SIZE",
++    "rsr a0, excsave2",
++    "rfi 2",
++    ".Llevel3_restore:",
++    "l32i a0, a1, FRAME_PC",
++    "wsr a0, epc3",
++    "l32i a0, a1, FRAME_PS",
++    "wsr a0, eps3",
++    "addi a1, a1, FRAME_SIZE",
++    "rsr a0, excsave3",
++    "rfi 3",
++    ".Llevel4_restore:",
++    "l32i a0, a1, FRAME_PC",
++    "wsr a0, epc4",
++    "l32i a0, a1, FRAME_PS",
++    "wsr a0, eps4",
++    "addi a1, a1, FRAME_SIZE",
++    "rsr a0, excsave4",
++    // (rfdd: not in the LLVM assembler)
++    ".byte 0x10, 0xe0, 0xf1",
++    ".Llevel5_restore:",
++    "l32i a0, a1, FRAME_PC",
++    "wsr a0, epc5",
++    "l32i a0, a1, FRAME_PS",
++    "wsr a0, eps5",
++    "addi a1, a1, FRAME_SIZE",
++    "rsr a0, excsave5",
++    "rfe",
++    // Level 2 interrupt vector (medium priority interrupts)
++    ".section .Level2InterruptVector.text, \"ax\"",
++    ".global _Level2InterruptVector",
++    ".align 4",
++    "_Level2InterruptVector:",
++    "wsr a0, excsave2",
++    "movi a0, 2",
++    "j _xt_int_enter",
++    // Level 3 interrupt vector (high priority interrupts)
++    ".section .Level3InterruptVector.text, \"ax\"",
++    ".global _Level3InterruptVector",
++    ".align 4",
++    "_Level3InterruptVector:",
++    "wsr a0, excsave3",
++    "movi a0, 3",
++    "j _xt_int_enter",
++    // Debug exception vector
++    ".section .DebugExceptionVector.text, \"ax\"",
++    ".global _DebugExceptionVector",
++    ".align 4",
++    "_DebugExceptionVector:",
++    "wsr a0, excsave4",
++    "movi a0, 4",
++    "j _xt_int_enter",
++    // Kernel exception vector
++    ".section .KernelExceptionVector.text, \"ax\"",
++    ".global _KernelExceptionVector",
++    ".align 4",
++    "_KernelExceptionVector:",
++    "wsr a0, excsave1",
++    "movi a0, 1",
++    "j _xt_int_enter",
++    // User exception vector
++    ".section .UserExceptionVector.text, \"ax\"",
++    ".global _UserExceptionVector",
++    ".align 4",
++    "_UserExceptionVector:",
++    "wsr a0, excsave5",
++    "movi a0, 5",
++    "j _xt_int_enter",
++    // Double exception vector: hang
++    ".section .DoubleExceptionVector.text, \"ax\"",
++    ".global _DoubleExceptionVector",
++    ".align 4",
++    "_DoubleExceptionVector:",
++    "rsr a2, exccause",
++    "rsr a3, excvaddr",
++    ".Ldouble_hang:",
++    "j .Ldouble_hang",
++);
++
++// A shutdown inside an irq handler: C's longjmp() to sched_main() (it
++// leaves exception mode, PS.EXCM, and restores the stack), here a jump to
++// the top of the stack and sched_main_loop()
++pub fn hifi4_irq_shutdown(s: Shutdown) -> ! {
++    let ps = super::lib::hal_core::xtensa_get_ps() & !super::lib::hal_core::PS_EXCM;
++    unsafe {
++        asm!(
++            "wsr.ps {ps}",
++            "isync",
++            "mov a1, {stack}",
++            "jx {entry}",
++            ps = in(reg) ps,
++            stack = in(reg) core::ptr::addr_of!(__stack),
++            entry = in(reg) hifi4_irq_shutdown_entry as extern "C" fn(u32) -> !,
++            in("a2") s.reason() as u32,
++            options(noreturn),
++        )
++    }
++}
++
++extern "C" fn hifi4_irq_shutdown_entry(reason: u32) -> ! {
++    sched_main_loop(Some(reason as u8))
++}
+diff --git a/firmware/src/hifi4/timer.rs b/firmware/src/hifi4/timer.rs
+new file mode 100644
+index 0000000..5331335
+--- /dev/null
++++ b/firmware/src/hifi4/timer.rs
+@@ -0,0 +1,73 @@
++// Timer functions for hifi4: the CCOUNT cycle counter and its CCOMPARE0
++// interrupt.
++//
++// Copyright (C) 2025  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::irq::{irq_disable, irq_enable};
++use super::lib::hal_core::{irq_enable_interrupt, irq_register};
++use super::lib::IRQ_COMPARE0;
++use super::startup::hifi4_irq_shutdown;
++use crate::ctr::Global;
++use crate::generic::timer_irq::{timer_dispatch_many, timer_from_us};
++use crate::sched::{sched_add_timer, Timer, R, SF_RESCHEDULE};
++use crate::{decl_init, decl_shutdown};
++use core::arch::asm;
++use core::ptr::null_mut;
++
++fn ccompare0_irq_handler(_irq: u32) {
++    irq_disable();
++    let next = match timer_dispatch_many() {
++        Ok(next) => next,
++        Err(s) => hifi4_irq_shutdown(s),
++    };
++    timer_set(next);
++    irq_enable();
++}
++
++// Return the current time (in absolute clock ticks).
++pub fn timer_read_time() -> u32 {
++    let val: u32;
++    unsafe { asm!("rsr.ccount {0}", out(reg) val) };
++    val
++}
++
++fn timer_set(next: u32) {
++    unsafe { asm!("wsr.ccompare0 {0}", "rsync", in(reg) next) }
++}
++
++// Activate timer dispatch as soon as possible
++pub fn timer_kick() {
++    timer_set(timer_read_time().wrapping_add(500));
++}
++
++// Dummy timer to avoid scheduling a timer irq greater than 0xffffff
++unsafe fn timer_wrap_event(t: *mut Timer) -> R<u8> {
++    (*t).waketime = (*t).waketime.wrapping_add(0xffffff);
++    Ok(SF_RESCHEDULE)
++}
++static WRAP_TIMER: Global<Timer> = Global::new(Timer { next: null_mut(), func: Some(timer_wrap_event), waketime: 0xffffff });
++
++pub fn timer_reset() -> R {
++    if timer_from_us(100000) <= 0xffffff {
++        // Timer in sched.c already ensures the timer wont overflow
++        return Ok(());
++    }
++    sched_add_timer(WRAP_TIMER.get())
++}
++decl_shutdown!(timer_reset);
++
++/****************************************************************
++ * Setup and irqs
++ ****************************************************************/
++
++pub fn timer_hw_init() -> R {
++    // Reset CCOUNT to 0
++    unsafe { asm!("wsr.ccount {0}", "rsync", in(reg) 0u32) };
++    irq_register(IRQ_COMPARE0, ccompare0_irq_handler);
++    timer_reset()?;
++    timer_kick();
++    irq_enable_interrupt(IRQ_COMPARE0);
++    Ok(())
++}
++decl_init!(timer_hw_init);
+diff --git a/firmware/src/hifi4/watchdog.rs b/firmware/src/hifi4/watchdog.rs
+new file mode 100644
+index 0000000..ea4999f
+--- /dev/null
++++ b/firmware/src/hifi4/watchdog.rs
+@@ -0,0 +1,33 @@
++// Watchdog code on hifi4
++//
++// Copyright (C) 2026  James Turton <james.turton@gmx.com>
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++use super::lib::hal_core::hal_restart;
++use super::lib::watchdog::{watchdog_init, watchdog_kick, watchdog_set_handler, watchdog_start, WDOG_INTV_1_SEC};
++use crate::command::Args;
++use crate::sched::R;
++use crate::{decl_command, decl_init, decl_task};
++
++pub fn command_reset(_args: &Args) -> R {
++    hal_restart();
++}
++decl_command!(command_reset, HF_IN_SHUTDOWN, "reset");
++
++pub fn watchdog_hw_reset() -> R {
++    watchdog_kick();
++    Ok(())
++}
++decl_task!(watchdog_hw_reset);
++
++fn wdog_irq_handler(_irq: u32) {
++    hal_restart();
++}
++
++pub fn watchdog_hw_init() -> R {
++    watchdog_set_handler(wdog_irq_handler);
++    watchdog_init(WDOG_INTV_1_SEC, false);
++    watchdog_start();
++    Ok(())
++}
++decl_init!(watchdog_hw_init);
+diff --git a/firmware/src/main.rs b/firmware/src/main.rs
+index e82fa2c..e75e3dc 100644
+--- a/firmware/src/main.rs
++++ b/firmware/src/main.rs
+@@ -4,8 +4,10 @@
+ #![allow(clippy::missing_safety_doc, clippy::new_without_default)]
+ // the micro-controller boards: no operating system
+ #![cfg_attr(not(any(CONFIG_MACH_LINUX, CONFIG_MACH_SIMU)), no_std, no_main)]
+-// (avr: inline assembly and interrupt handlers are nightly features there)
++// (avr: inline assembly and interrupt handlers are nightly features there;
++// hifi4, xtensa: inline assembly)
+ #![cfg_attr(CONFIG_MACH_AVR, feature(asm_experimental_arch, abi_avr_interrupt))]
++#![cfg_attr(CONFIG_MACH_HIFI4, feature(asm_experimental_arch))]
+ 
+ #[allow(non_upper_case_globals, dead_code)]
+ pub mod config {
+@@ -129,6 +131,10 @@ pub use hc32f460 as board;
+ pub mod avr;
+ #[cfg(CONFIG_MACH_AVR)]
+ pub use avr as board;
++#[cfg(CONFIG_MACH_HIFI4)]
++pub mod hifi4;
++#[cfg(CONFIG_MACH_HIFI4)]
++pub use hifi4 as board;
+ #[cfg(CONFIG_MACH_SIMU)]
+ pub mod simulator;
+ #[cfg(CONFIG_MACH_SIMU)]
+diff --git a/firmware/targets/xtensa-hifi4-none-elf.json b/firmware/targets/xtensa-hifi4-none-elf.json
+new file mode 100644
+index 0000000..0b62cbd
+--- /dev/null
++++ b/firmware/targets/xtensa-hifi4-none-elf.json
+@@ -0,0 +1,22 @@
++{
++  "arch": "xtensa",
++  "cpu": "generic",
++  "features": "+density,+loop,+mul32,+mul32high,+div32,+nsa,+sext,+debug,+exception,+interrupt,+highpriinterrupts,+highpriinterrupts-level3,+highpriinterrupts-level4,+highpriinterrupts-level5,+prid,+timers1,+rvector,-windowed",
++  "crt-objects-fallback": "false",
++  "data-layout": "e-m:e-p:32:32-v1:8:8-i64:64-i128:128-n32",
++  "emit-debug-gdb-scripts": false,
++  "linker": "xtensa-nxp_rt700_hifi4_zephyr-elf-gcc",
++  "linker-flavor": "gnu-cc",
++  "llvm-target": "xtensa-none-elf",
++  "max-atomic-width": 0,
++  "metadata": {
++    "description": "Xtensa HiFi4 DSP (Allwinner R528 / T113), call0 ABI, no FP",
++    "host_tools": false,
++    "std": false,
++    "tier": 3
++  },
++  "panic-strategy": "abort",
++  "relocation-model": "static",
++  "target-pointer-width": 32,
++  "vendor": "unknown"
++}
+diff --git a/firmware/tests/ctr_check.sh b/firmware/tests/ctr_check.sh
+index af9852b..4ef338e 100644
+--- a/firmware/tests/ctr_check.sh
++++ b/firmware/tests/ctr_check.sh
+@@ -18,6 +18,12 @@ for c in $configs; do
+         target=avr-none; tdir=$target/mcu; profile="--profile mcu"
+         nightly=+nightly; buildstd="-Z build-std=core"; optlevel=z
+         rustflags="-C target-cpu=$(sed -n 's/^#define CONFIG_MCU "\(.*\)"/\1/p' $a)"
++    elif grep -q "CONFIG_MACH_HIFI4 1" $a; then
++        # (hifi4, COSMOS's DSP: xtensa, the esp-rs toolchain (rustup
++        # toolchain link esp), its core built here; COSMOS's gcc links)
++        target=$(pwd)/targets/xtensa-hifi4-none-elf.json; tdir=xtensa-hifi4-none-elf/mcu; profile="--profile mcu"
++        nightly=+esp; buildstd="-Zjson-target-spec -Z build-std=core,compiler_builtins -Z build-std-features=compiler-builtins-mem"
++        export PATH=${XTENSA_GCC_BIN:-~/rk/xtensa/xtensa-nxp_rt700_hifi4_zephyr-elf/bin}:$PATH
+     elif grep -q "CONFIG_MACH_LINUX 1\|CONFIG_MACH_SIMU 1" $a; then
+         target=""; tdir=release; profile=--release
+     elif grep -q "CONFIG_MACH_STM32F4 1\|CONFIG_MACH_STM32F7 1\|CONFIG_MACH_STM32G4 1\|CONFIG_MACH_STM32L4 1\|CONFIG_MACH_STM32H7 1\|CONFIG_MACH_N32G45x 1\|CONFIG_MACH_SAM4 1\|CONFIG_MACH_SAME70 1\|CONFIG_MACH_SAMX5 1\|CONFIG_MACH_HC32F460 1" $a; then
+diff --git a/firmware/tests/ref/cosmos-cc1-dsp_compile_time_request.txt b/firmware/tests/ref/cosmos-cc1-dsp_compile_time_request.txt
+new file mode 100644
+index 0000000..40ba943
+--- /dev/null
++++ b/firmware/tests/ref/cosmos-cc1-dsp_compile_time_request.txt
+@@ -0,0 +1,126 @@
++_DECL_STATIC_STR sentinel timer called
++_DECL_STATIC_STR Timer too close
++_DECL_STATIC_STR Shutdown cleared when not shutdown
++_DECL_ENCODER shutdown clock=%u static_string_id=%hu
++_DECL_ENCODER is_shutdown static_string_id=%hu
++_DECL_ENCODER starting
++_DECL_STATIC_STR Command parser error
++_DECL_STATIC_STR Message encode error
++_DECL_CALLLIST ctr_run_shutdownfuncs sendf_shutdown
++_DECL_STATIC_STR Invalid command
++_DECL_CALLLIST ctr_run_initfuncs alloc_init
++_DECL_STATIC_STR alloc_chunk failed
++_DECL_STATIC_STR alloc_chunks failed
++_DECL_STATIC_STR Move queue overflow
++_DECL_STATIC_STR Invalid move request size
++_DECL_CALLLIST ctr_run_shutdownfuncs move_reset
++_DECL_STATIC_STR Already finalized
++_DECL_STATIC_STR Invalid oid type
++_DECL_STATIC_STR Can't assign oid
++_DECL_STATIC_STR oids already allocated
++DECL_COMMAND_FLAGS command_allocate_oids 0 allocate_oids count=%c
++_DECL_ENCODER config is_config=%c crc=%u is_shutdown=%c move_count=%hu
++DECL_COMMAND_FLAGS command_get_config 0x01 get_config
++DECL_COMMAND_FLAGS command_finalize_config 0 finalize_config crc=%u
++_DECL_STATIC_STR config_reset only available when shutdown
++_DECL_ENCODER clock clock=%u
++DECL_COMMAND_FLAGS command_get_clock 0x01 get_clock
++_DECL_ENCODER uptime high=%u clock=%u
++DECL_COMMAND_FLAGS command_get_uptime 0x01 get_uptime
++DECL_CONSTANT STATS_SUMSQ_BASE +0x00000100
++_DECL_ENCODER stats count=%u sum=%u sumsq=%u
++_DECL_STATIC_STR Command request
++DECL_COMMAND_FLAGS command_emergency_stop 0x01 emergency_stop
++DECL_COMMAND_FLAGS command_clear_shutdown 0x01 clear_shutdown
++_DECL_ENCODER identify_response offset=%u data=%.*s
++DECL_COMMAND_FLAGS command_identify 0x01 identify offset=%u count=%c
++_DECL_ENCODER debug_result val=%u
++DECL_COMMAND_FLAGS command_debug_read 0x01 debug_read order=%c addr=%u
++DECL_COMMAND_FLAGS command_debug_write 0x01 debug_write order=%c addr=%u val=%u
++_DECL_ENCODER pong data=%*s
++DECL_COMMAND_FLAGS command_debug_ping 0x01 debug_ping data=%*s
++DECL_COMMAND_FLAGS command_debug_nop 0x01 debug_nop
++DECL_INITIAL_PINS ""
++_DECL_CALLLIST ctr_run_initfuncs initial_pins_setup
++_DECL_STATIC_STR Missed scheduling of next digital out event
++_DECL_STATIC_STR Scheduled digital out event will exceed max_duration
++DECL_COMMAND_FLAGS command_config_digital_out 0 config_digital_out oid=%c pin=%u value=%c default_value=%c max_duration=%u
++_DECL_STATIC_STR Can not set soft pwm cycle ticks while updates pending
++DECL_COMMAND_FLAGS command_set_digital_out_pwm_cycle 0 set_digital_out_pwm_cycle oid=%c cycle_ticks=%u
++_DECL_STATIC_STR Scheduled digital out event will exceed max_duration
++DECL_COMMAND_FLAGS command_queue_digital_out 0 queue_digital_out oid=%c clock=%u on_ticks=%u
++_DECL_STATIC_STR update_digital_out not valid with active queue
++DECL_COMMAND_FLAGS command_update_digital_out 0 update_digital_out oid=%c value=%c
++_DECL_CALLLIST ctr_run_shutdownfuncs digital_out_shutdown
++DECL_COMMAND_FLAGS command_set_digital_out 0 set_digital_out pin=%u value=%c
++DECL_CONSTANT STEPPER_STEP_BOTH_EDGE +0x00000001
++_DECL_STATIC_STR Stepper too far in past
++DECL_COMMAND_FLAGS command_config_stepper 0 config_stepper oid=%c step_pin=%c dir_pin=%c invert_step=%c step_pulse_ticks=%u
++_DECL_STATIC_STR Invalid count parameter
++DECL_COMMAND_FLAGS command_queue_step 0 queue_step oid=%c interval=%u count=%hu add=%hi
++DECL_COMMAND_FLAGS command_set_next_step_dir 0 set_next_step_dir oid=%c dir=%c
++_DECL_STATIC_STR Can't reset time when stepper active
++DECL_COMMAND_FLAGS command_reset_step_clock 0 reset_step_clock oid=%c clock=%u
++_DECL_ENCODER stepper_position oid=%c pos=%i
++DECL_COMMAND_FLAGS command_stepper_get_position 0 stepper_get_position oid=%c
++DECL_COMMAND_FLAGS command_stepper_stop_on_trigger 0 stepper_stop_on_trigger oid=%c trsync_oid=%c
++_DECL_CALLLIST ctr_run_shutdownfuncs stepper_shutdown
++DECL_COMMAND_FLAGS command_config_endstop 0 config_endstop oid=%c pin=%c pull_up=%c
++DECL_COMMAND_FLAGS command_endstop_home 0 endstop_home oid=%c clock=%u sample_ticks=%u sample_count=%c rest_ticks=%u pin_value=%c trsync_oid=%c trigger_reason=%c
++_DECL_ENCODER endstop_state oid=%c homing=%c next_clock=%u pin_value=%c
++DECL_COMMAND_FLAGS command_endstop_query_state 0 endstop_query_state oid=%c
++DECL_COMMAND_FLAGS command_config_trsync 0 config_trsync oid=%c
++_DECL_STATIC_STR Can't add signal that is already active
++DECL_COMMAND_FLAGS command_trsync_start 0 trsync_start oid=%c report_clock=%u report_ticks=%u expire_reason=%c
++DECL_COMMAND_FLAGS command_trsync_set_timeout 0 trsync_set_timeout oid=%c clock=%u
++_DECL_ENCODER trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u
++DECL_COMMAND_FLAGS command_trsync_trigger 0 trsync_trigger oid=%c reason=%c
++_DECL_CALLLIST ctr_run_taskfuncs trsync_task
++_DECL_CALLLIST ctr_run_shutdownfuncs trsync_shutdown
++_DECL_STATIC_STR ADC out of range
++DECL_COMMAND_FLAGS command_config_analog_in 0 config_analog_in oid=%c pin=%u
++DECL_COMMAND_FLAGS command_query_analog_in 0 query_analog_in oid=%c clock=%u sample_ticks=%u sample_count=%c rest_ticks=%u min_value=%hu max_value=%hu range_check_count=%c
++_DECL_ENCODER analog_in_state oid=%c next_clock=%u value=%hu
++_DECL_CALLLIST ctr_run_taskfuncs analog_in_task
++_DECL_CALLLIST ctr_run_shutdownfuncs analog_in_shutdown
++_DECL_STATIC_STR Max of 8 buttons
++DECL_COMMAND_FLAGS command_config_buttons 0 config_buttons oid=%c button_count=%c
++_DECL_STATIC_STR Set button past maximum button count
++DECL_COMMAND_FLAGS command_buttons_add 0 buttons_add oid=%c pos=%c pin=%u pull_up=%c
++_DECL_STATIC_STR Invalid buttons retransmit count
++DECL_COMMAND_FLAGS command_buttons_query 0 buttons_query oid=%c clock=%u rest_ticks=%u retransmit_count=%c invert=%c
++DECL_COMMAND_FLAGS command_buttons_ack 0 buttons_ack oid=%c count=%c
++_DECL_ENCODER buttons_state oid=%c ack_count=%c state=%*s
++_DECL_CALLLIST ctr_run_taskfuncs buttons_task
++DECL_COMMAND_FLAGS command_config_tmcuart 0 config_tmcuart oid=%c rx_pin=%u pull_up=%c tx_pin=%u bit_time=%u
++_DECL_STATIC_STR tmcuart data too large
++DECL_COMMAND_FLAGS command_tmcuart_send 0 tmcuart_send oid=%c write=%*s read=%c
++_DECL_ENCODER tmcuart_response oid=%c read=%*s
++_DECL_CALLLIST ctr_run_taskfuncs tmcuart_task
++_DECL_CALLLIST ctr_run_shutdownfuncs tmcuart_shutdown
++DECL_COMMAND_FLAGS command_config_counter 0 config_counter oid=%c pin=%u pull_up=%c
++DECL_COMMAND_FLAGS command_query_counter 0 query_counter oid=%c clock=%u poll_ticks=%u sample_ticks=%u
++_DECL_ENCODER counter_state oid=%c next_clock=%u count=%u count_clock=%u
++_DECL_CALLLIST ctr_run_taskfuncs counter_task
++DECL_ENUMERATION_RANGE pin PB0 +0x00000020 +0x00000010
++DECL_ENUMERATION_RANGE pin PC0 +0x00000040 +0x00000008
++DECL_ENUMERATION_RANGE pin PD0 +0x00000060 +0x00000017
++DECL_ENUMERATION_RANGE pin PE0 +0x00000080 +0x00000012
++DECL_ENUMERATION_RANGE pin PF0 +0x000000A0 +0x00000007
++DECL_ENUMERATION_RANGE pin PG0 +0x000000C0 +0x00000013
++DECL_CONSTANT ADC_MAX +0x00000FFF
++_DECL_STATIC_STR Not a valid ADC pin
++_DECL_CALLLIST ctr_run_initfuncs adc_init
++_DECL_CALLLIST ctr_run_initfuncs rpmsg_transport_init
++DECL_CONSTANT RECEIVE_WINDOW +0x000000C0
++DECL_CONSTANT TRANSMIT_WINDOW +0x000000C0
++_DECL_CALLLIST ctr_run_taskfuncs rpmsg_consume_task
++_DECL_CALLLIST ctr_run_taskfuncs rpmsg_send_task
++DECL_COMMAND_FLAGS command_reset 0x01 reset
++_DECL_CALLLIST ctr_run_taskfuncs watchdog_hw_reset
++_DECL_CALLLIST ctr_run_initfuncs watchdog_hw_init
++_DECL_CALLLIST ctr_run_shutdownfuncs timer_reset
++_DECL_CALLLIST ctr_run_initfuncs timer_hw_init
++DECL_CONSTANT CLOCK_FREQ +0x23C34600
++_DECL_STATIC_STR Rescheduled timer in the past
++_DECL_CALLLIST ctr_run_taskfuncs timer_task
+diff --git a/firmware/tests/ref/cosmos-cc1-dsp_klipper.dict b/firmware/tests/ref/cosmos-cc1-dsp_klipper.dict
+new file mode 100644
+index 0000000..f277ebc
+--- /dev/null
++++ b/firmware/tests/ref/cosmos-cc1-dsp_klipper.dict
+@@ -0,0 +1 @@
++{"app":"Kalico","build_versions":"gcc: (Zephyr SDK 0.17.4) 12.2.0 binutils: (Zephyr SDK 0.17.4) 2.38","commands":{"allocate_oids count=%c":2,"buttons_ack oid=%c count=%c":36,"buttons_add oid=%c pos=%c pin=%u pull_up=%c":34,"buttons_query oid=%c clock=%u rest_ticks=%u retransmit_count=%c invert=%c":35,"clear_shutdown":8,"config_analog_in oid=%c pin=%u":31,"config_buttons oid=%c button_count=%c":33,"config_counter oid=%c pin=%u pull_up=%c":39,"config_digital_out oid=%c pin=%u value=%c default_value=%c max_duration=%u":13,"config_endstop oid=%c pin=%c pull_up=%c":24,"config_stepper oid=%c step_pin=%c dir_pin=%c invert_step=%c step_pulse_ticks=%u":18,"config_tmcuart oid=%c rx_pin=%u pull_up=%c tx_pin=%u bit_time=%u":37,"config_trsync oid=%c":27,"debug_nop":12,"debug_ping data=%*s":11,"debug_read order=%c addr=%u":9,"debug_write order=%c addr=%u val=%u":10,"emergency_stop":7,"endstop_home oid=%c clock=%u sample_ticks=%u sample_count=%c rest_ticks=%u pin_value=%c trsync_oid=%c trigger_reason=%c":25,"endstop_query_state oid=%c":26,"finalize_config crc=%u":4,"get_clock":5,"get_config":3,"get_uptime":6,"identify offset=%u count=%c":1,"query_analog_in oid=%c clock=%u sample_ticks=%u sample_count=%c rest_ticks=%u min_value=%hu max_value=%hu range_check_count=%c":32,"query_counter oid=%c clock=%u poll_ticks=%u sample_ticks=%u":40,"queue_digital_out oid=%c clock=%u on_ticks=%u":15,"queue_step oid=%c interval=%u count=%hu add=%hi":19,"reset":41,"reset_step_clock oid=%c clock=%u":21,"set_digital_out pin=%u value=%c":17,"set_digital_out_pwm_cycle oid=%c cycle_ticks=%u":14,"set_next_step_dir oid=%c dir=%c":20,"stepper_get_position oid=%c":22,"stepper_stop_on_trigger oid=%c trsync_oid=%c":23,"tmcuart_send oid=%c write=%*s read=%c":38,"trsync_set_timeout oid=%c clock=%u":29,"trsync_start oid=%c report_clock=%u report_ticks=%u expire_reason=%c":28,"trsync_trigger oid=%c reason=%c":30,"update_digital_out oid=%c value=%c":16},"config":{"ADC_MAX":4095,"CLOCK_FREQ":600000000,"RECEIVE_WINDOW":192,"STATS_SUMSQ_BASE":256,"STEPPER_STEP_BOTH_EDGE":1,"TRANSMIT_WINDOW":192},"enumerations":{"pin":{"PB0":[32,16],"PC0":[64,8],"PD0":[96,23],"PE0":[128,18],"PF0":[160,7],"PG0":[192,19]},"static_string_id":{"ADC out of range":26,"Already finalized":12,"Can not set soft pwm cycle ticks while updates pending":20,"Can't add signal that is already active":25,"Can't assign oid":14,"Can't reset time when stepper active":24,"Command parser error":5,"Command request":17,"Invalid buttons retransmit count":29,"Invalid command":7,"Invalid count parameter":23,"Invalid move request size":11,"Invalid oid type":13,"Max of 8 buttons":27,"Message encode error":6,"Missed scheduling of next digital out event":18,"Move queue overflow":10,"Not a valid ADC pin":31,"Rescheduled timer in the past":32,"Scheduled digital out event will exceed max_duration":19,"Set button past maximum button count":28,"Shutdown cleared when not shutdown":4,"Stepper too far in past":22,"Timer too close":3,"alloc_chunk failed":8,"alloc_chunks failed":9,"config_reset only available when shutdown":16,"oids already allocated":15,"sentinel timer called":2,"tmcuart data too large":30,"update_digital_out not valid with active queue":21}},"kconfig":"CONFIG_LOW_LEVEL_OPTIONS=y\nCONFIG_MACH_HIFI4=y\n# CONFIG_WANT_SOFTWARE_SPI is not set\n# CONFIG_WANT_SOFTWARE_I2C is not set\n# CONFIG_WANT_HARD_PWM is not set\n# CONFIG_WANT_NEOPIXEL is not set\n# CONFIG_WANT_ST7920 is not set\n# CONFIG_WANT_HD44780 is not set\n# CONFIG_WANT_HX71X is not set\n# CONFIG_WANT_HX711S is not set\n# CONFIG_WANT_CS1237 is not set\n# CONFIG_WANT_GPIO_SPI is not set\n","license":"GNU GPLv3","responses":{"analog_in_state oid=%c next_clock=%u value=%hu":54,"buttons_state oid=%c ack_count=%c state=%*s":55,"clock clock=%u":46,"config is_config=%c crc=%u is_shutdown=%c move_count=%hu":45,"counter_state oid=%c next_clock=%u count=%u count_clock=%u":57,"debug_result val=%u":49,"endstop_state oid=%c homing=%c next_clock=%u pin_value=%c":52,"identify_response offset=%u data=%.*s":0,"is_shutdown static_string_id=%hu":43,"pong data=%*s":50,"shutdown clock=%u static_string_id=%hu":42,"starting":44,"stats count=%u sum=%u sumsq=%u":48,"stepper_position oid=%c pos=%i":51,"tmcuart_response oid=%c read=%*s":56,"trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u":53,"uptime high=%u clock=%u":47},"version":"Release - test-20261025_030824-PIGSTATION"}
+\ No newline at end of file

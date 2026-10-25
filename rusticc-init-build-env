@@ -1,0 +1,6 @@
+# Set up a Rusticc build: source it (bash), then bitbake as with COSMOS
+# (cosmos/Development.md), e.g. `bitbake cosmos-image-usb`.
+#   . ./rusticc-init-build-env [BUILDDIR]   (default: build)
+RUSTICC_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+TEMPLATECONF="$RUSTICC_ROOT/meta-rusticc/conf/templates/rusticc" \
+    . "$RUSTICC_ROOT/cosmos/openembedded-core/oe-init-build-env" "${1:-$RUSTICC_ROOT/build}"

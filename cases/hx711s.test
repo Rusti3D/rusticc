@@ -1,0 +1,6 @@
+# Rusticc: COSMOS hx711s load cell (the CC1 bed's [load_cell_probe])
+CONFIG hx711s.cfg
+DICTIONARY atmega2560.dict bed=cc1_bed.dict
+
+G4 P100
+CONFIG hx711s_one.cfg

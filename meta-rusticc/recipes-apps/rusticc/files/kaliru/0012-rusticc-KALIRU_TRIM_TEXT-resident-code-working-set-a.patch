@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sun, 25 Oct 2026 00:58:03 +0300
+Subject: [PATCH 12/14] rusticc: KALIRU_TRIM_TEXT (resident code = working set
+ after startup), api/status profile scopes; run script trims after 120 s
+
+Measured on the CC1 idle: RSS 33.9 -> 30.7 MB, PSS 32.2 -> 28.9 MB (stock
+COSMOS: 31.4 MB RSS + 4.1 MB swapped, PSS 30.1 MB).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
+---
+ src/pcprof.rs   | 25 +++++++++++++++++++++++++
+ src/printer.rs  |  1 +
+ src/webhooks.rs |  3 ++-
+ 3 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/src/pcprof.rs b/src/pcprof.rs
+index 9ef6a4b..c748a94 100644
+--- a/src/pcprof.rs
++++ b/src/pcprof.rs
+@@ -177,3 +177,28 @@ pub fn reactor_prof_tick(eventtime: f64) {
+         crate::logging::info(&format!("reactor_prof: {:8.3}ms {:7} calls {}", *ns as f64 / 1e6, n, k));
+     }
+ }
++
++/// KALIRU_TRIM_TEXT=SECS: SECS seconds after start, drop the page-table
++/// entries of the executable's and libpython's code (MADV_DONTNEED on a
++/// private file mapping: the pages stay in the page cache and refault only
++/// where they run again), so resident code is the working set, not startup
++/// plus read-around (MADV_RANDOM first)
++pub fn trim_text_later() {
++    let Some(secs) = std::env::var("KALIRU_TRIM_TEXT").ok().and_then(|s| s.parse::<u64>().ok()) else { return };
++    std::thread::spawn(move || {
++        std::thread::sleep(std::time::Duration::from_secs(secs));
++        let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
++        for l in std::fs::read_to_string("/proc/self/maps").unwrap_or_default().lines() {
++            let f: Vec<&str> = l.split_whitespace().collect();
++            if f.len() < 6 || !f[1].contains('x') || !(f[5] == exe || f[5].contains("libpython")) {
++                continue;
++            }
++            let Some((lo, hi)) = f[0].split_once('-') else { continue };
++            let (lo, hi) = (usize::from_str_radix(lo, 16).unwrap_or(0), usize::from_str_radix(hi, 16).unwrap_or(0));
++            unsafe {
++                libc::madvise(lo as *mut libc::c_void, hi - lo, libc::MADV_RANDOM);
++                libc::madvise(lo as *mut libc::c_void, hi - lo, libc::MADV_DONTNEED);
++            }
++        }
++    });
++}
+diff --git a/src/printer.rs b/src/printer.rs
+index 22a5a3e..4c8d6d8 100644
+--- a/src/printer.rs
++++ b/src/printer.rs
+@@ -849,6 +849,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
+ pub fn main() {
+     crate::util::fix_sigint();
+     crate::pcprof::start();
++    crate::pcprof::trim_text_later();
+     let argv: Vec<String> = std::env::args().skip(1).collect();
+     let (options, args) = parse_args(&argv);
+     if options.import_test {
+diff --git a/src/webhooks.rs b/src/webhooks.rs
+index 4a519ae..9f3ad23 100644
+--- a/src/webhooks.rs
++++ b/src/webhooks.rs
+@@ -430,7 +430,8 @@ impl ClientConnection {
+         let res = (|| -> KResult<()> {
+             let wh = self.webhooks.upgrade().ok_or_else(|| KError::Other("webhooks gone".into()))?;
+             let func = wh.get_callback(web_request.get_method())?;
+-            crate::running::run(&web_request, |w| func(w))
++            // (rusticc: KALIRU_REACTOR_PROF per API method)
++            crate::pcprof::scope(|| format!("api:{}", web_request.get_method()), || crate::running::run(&web_request, |w| func(w)))
+         })();
+         if let Err(e) = res {
+             if e.is_command_error() {

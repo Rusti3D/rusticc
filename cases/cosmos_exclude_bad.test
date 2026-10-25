@@ -1,0 +1,5 @@
+SHOULD_FAIL
+CONFIG cosmos_exclude_bad.cfg
+DICTIONARY atmega2560.dict
+
+G4 P100

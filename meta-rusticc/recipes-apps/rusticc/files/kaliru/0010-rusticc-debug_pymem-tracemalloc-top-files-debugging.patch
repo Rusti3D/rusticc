@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sat, 24 Oct 2026 21:23:29 +0300
+Subject: [PATCH 10/14] rusticc: debug_pymem tracemalloc top files (debugging)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/webhooks.rs | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/src/webhooks.rs b/src/webhooks.rs
+index 96abe9b..91aaf67 100644
+--- a/src/webhooks.rs
++++ b/src/webhooks.rs
+@@ -940,6 +940,22 @@ impl QueryStatusHelper {
+                     if let Ok(f) = crate::plugins::py::lookup("sys", "_debugmallocstats") {
+                         let _ = f.call(&[]);
+                     }
++                    // with PYTHONTRACEMALLOC=1 set at start: the top files
++                    if std::env::var_os("PYTHONTRACEMALLOC").is_some() {
++                        let top = (|| -> crate::error::KResult<Vec<String>> {
++                            let snap = crate::plugins::py::lookup("tracemalloc", "take_snapshot")?.call(&[])?;
++                            let stats = snap.call_method("statistics", &[&crate::plugins::py::py_str("filename")])?;
++                            let mut out = vec![];
++                            for i in 0..40 {
++                                let Ok(s) = stats.call_method("__getitem__", &[&crate::plugins::py::py_int(i)]) else { break };
++                                out.push(s.str()?);
++                            }
++                            Ok(out)
++                        })();
++                        for l in top.unwrap_or_default() {
++                            logging::info(&format!("debug_pymem: {}", l));
++                        }
++                    }
+                 }
+             }
+         }

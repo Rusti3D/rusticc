@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sat, 24 Oct 2026 21:10:46 +0300
+Subject: [PATCH 08/14] rusticc: KALIRU_DEBUG_SUBS logs subscriptions and
+ status sizes (debugging)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/webhooks.rs | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/src/webhooks.rs b/src/webhooks.rs
+index 2151c9f..ac7930a 100644
+--- a/src/webhooks.rs
++++ b/src/webhooks.rs
+@@ -916,6 +916,26 @@ impl QueryStatusHelper {
+         for (_, (cconn, sub, template)) in self.clients.borrow().iter() {
+             msglist.push((Some(cconn.clone()), sub.clone(), SendFunc::Conn(cconn.clone()), template.clone()));
+         }
++        // rusticc debugging (KALIRU_DEBUG_SUBS=1): every 30 s, each client's
++        // subscribed objects and the json size of their status
++        if std::env::var_os("KALIRU_DEBUG_SUBS").is_some() {
++            thread_local!(static LAST: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) });
++            if eventtime - LAST.with(|l| l.get()) > 30.0 {
++                LAST.with(|l| l.set(eventtime));
++                for (_, sub, _, _) in &msglist {
++                    let mut parts = vec![];
++                    for (name, fields) in sub.borrow().iter() {
++                        let size = match self.printer.lookup_object_opt(name) {
++                            Some(po) if po.has_status() => po.get_status(eventtime).map(|v| v.json_compact().len()).unwrap_or(0),
++                            _ => 0,
++                        };
++                        let nf = fields.items().map(|i| i.len().to_string()).unwrap_or_else(|| "all".into());
++                        parts.push(format!("{}({} fields, {} B)", name, nf, size));
++                    }
++                    logging::info(&format!("debug_subs: {}", parts.join(" ")));
++                }
++            }
++        }
+         // Generate get_status() info for each client
+         for (cconn, subscription, send_func, template) in msglist {
+             let is_query = cconn.is_none();

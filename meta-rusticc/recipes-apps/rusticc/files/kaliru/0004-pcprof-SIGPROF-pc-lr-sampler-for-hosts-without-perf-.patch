@@ -1,0 +1,186 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sat, 24 Oct 2026 20:43:33 +0300
+Subject: [PATCH 04/14] pcprof: SIGPROF pc/lr sampler for hosts without perf
+ (KALIRU_PCPROF), tools/pcprof_report.py
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/lib.rs             |  1 +
+ src/pcprof.rs          | 81 ++++++++++++++++++++++++++++++++++++++++++
+ src/printer.rs         |  1 +
+ tools/pcprof_report.py | 53 +++++++++++++++++++++++++++
+ 4 files changed, 136 insertions(+)
+ create mode 100644 src/pcprof.rs
+ create mode 100644 tools/pcprof_report.py
+
+diff --git a/src/lib.rs b/src/lib.rs
+index 2b1ce78..a41f7af 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -12,6 +12,7 @@ pub mod kinematics;
+ pub mod logging;
+ pub mod mathutil;
+ pub mod numpy_fft;
++pub mod pcprof;
+ pub mod scipy_signal;
+ pub mod mcu;
+ pub mod msgproto;
+diff --git a/src/pcprof.rs b/src/pcprof.rs
+new file mode 100644
+index 0000000..5f9fd3e
+--- /dev/null
++++ b/src/pcprof.rs
+@@ -0,0 +1,81 @@
++// Development profiler for hosts without perf (the CC1): with
++// KALIRU_PCPROF=FILE, SIGPROF every 2 ms of process CPU time records the
++// interrupted thread's id, pc and link register. After KALIRU_PCPROF_SECS
++// (default 60) a thread writes "tid pc lr count" lines, plus the binary's
++// load address from /proc/self/maps, to FILE; map the addresses with
++// addr2line on an unstripped build of the same code
++// (tools/pcprof_report.py). Not in python; off unless the variable is set.
++use std::sync::atomic::{AtomicUsize, Ordering};
++
++const SLOTS: usize = 1 << 16;
++static SAMPLES: [[AtomicUsize; 3]; SLOTS] = [const { [const { AtomicUsize::new(0) }; 3] }; SLOTS];
++static COUNT: AtomicUsize = AtomicUsize::new(0);
++
++#[cfg(target_arch = "arm")]
++unsafe fn pc_lr(uc: *const libc::ucontext_t) -> (usize, usize) {
++    ((*uc).uc_mcontext.arm_pc as usize, (*uc).uc_mcontext.arm_lr as usize)
++}
++
++#[cfg(target_arch = "x86_64")]
++unsafe fn pc_lr(uc: *const libc::ucontext_t) -> (usize, usize) {
++    // no link register: the word at the stack pointer (a return address in
++    // a leaf before it sets up its frame, else a guess)
++    let g = &(*uc).uc_mcontext.gregs;
++    let sp = g[libc::REG_RSP as usize] as *const usize;
++    (g[libc::REG_RIP as usize] as usize, *sp)
++}
++
++#[cfg(not(any(target_arch = "arm", target_arch = "x86_64")))]
++unsafe fn pc_lr(_uc: *const libc::ucontext_t) -> (usize, usize) {
++    (0, 0)
++}
++
++extern "C" fn on_prof(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
++    let i = COUNT.fetch_add(1, Ordering::Relaxed);
++    if i >= SLOTS {
++        return;
++    }
++    let (pc, lr) = unsafe { pc_lr(ctx as *const libc::ucontext_t) };
++    let tid = unsafe { libc::syscall(libc::SYS_gettid) } as usize;
++    SAMPLES[i][0].store(tid, Ordering::Relaxed);
++    SAMPLES[i][1].store(pc, Ordering::Relaxed);
++    SAMPLES[i][2].store(lr, Ordering::Relaxed);
++}
++
++/// Start sampling if KALIRU_PCPROF is set
++pub fn start() {
++    let Some(path) = std::env::var_os("KALIRU_PCPROF") else { return };
++    let secs: u64 = std::env::var("KALIRU_PCPROF_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
++    unsafe {
++        let mut sa: libc::sigaction = std::mem::zeroed();
++        sa.sa_sigaction = on_prof as usize;
++        sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
++        libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
++        let tv = libc::timeval { tv_sec: 0, tv_usec: 2000 };
++        let it = libc::itimerval { it_interval: tv, it_value: tv };
++        libc::setitimer(libc::ITIMER_PROF, &it, std::ptr::null_mut());
++    }
++    std::thread::spawn(move || {
++        std::thread::sleep(std::time::Duration::from_secs(secs));
++        let n = COUNT.load(Ordering::Relaxed).min(SLOTS);
++        let mut hist: std::collections::HashMap<(usize, usize, usize), usize> = std::collections::HashMap::new();
++        for s in SAMPLES.iter().take(n) {
++            let key = (s[0].load(Ordering::Relaxed), s[1].load(Ordering::Relaxed), s[2].load(Ordering::Relaxed));
++            *hist.entry(key).or_default() += 1;
++        }
++        let mut out = String::new();
++        let exe = std::env::current_exe().unwrap_or_default();
++        for l in std::fs::read_to_string("/proc/self/maps").unwrap_or_default().lines() {
++            if l.ends_with(&*exe.to_string_lossy()) {
++                out += &format!("map {}\n", l);
++            }
++        }
++        out += &format!("samples {} interval_us 2000 secs {}\n", n, secs);
++        let mut rows: Vec<_> = hist.into_iter().collect();
++        rows.sort_by(|a, b| b.1.cmp(&a.1));
++        for ((tid, pc, lr), c) in rows {
++            out += &format!("{} {:x} {:x} {}\n", tid, pc, lr, c);
++        }
++        let _ = std::fs::write(&path, out);
++    });
++}
+diff --git a/src/printer.rs b/src/printer.rs
+index e079a46..22a5a3e 100644
+--- a/src/printer.rs
++++ b/src/printer.rs
+@@ -848,6 +848,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
+ 
+ pub fn main() {
+     crate::util::fix_sigint();
++    crate::pcprof::start();
+     let argv: Vec<String> = std::env::args().skip(1).collect();
+     let (options, args) = parse_args(&argv);
+     if options.import_test {
+diff --git a/tools/pcprof_report.py b/tools/pcprof_report.py
+new file mode 100644
+index 0000000..88b3c03
+--- /dev/null
++++ b/tools/pcprof_report.py
+@@ -0,0 +1,53 @@
++#!/usr/bin/env python3
++# Report of a KALIRU_PCPROF file (src/pcprof.rs): samples per function and
++# per caller, mapped with addr2line on an unstripped build of the same code.
++# usage: pcprof_report.py PROFILE UNSTRIPPED_BINARY [ADDR2LINE] [TID]
++import collections
++import subprocess
++import sys
++
++prof, binary = sys.argv[1], sys.argv[2]
++addr2line = sys.argv[3] if len(sys.argv) > 3 else "addr2line"
++only_tid = sys.argv[4] if len(sys.argv) > 4 else None
++maps, rows, total = [], [], 0
++for line in open(prof):
++    f = line.split()
++    if f[0] == "map":
++        lo, hi = (int(x, 16) for x in f[1].split("-"))
++        maps.append((lo, hi, int(f[3], 16)))
++    elif f[0] == "samples":
++        total = int(f[1])
++    else:
++        rows.append((f[0], int(f[1], 16), int(f[2], 16), int(f[3])))
++
++
++def vaddr(a):
++    # PIE: the binary's own mappings; file offset == virtual address
++    for lo, hi, off in maps:
++        if lo <= a < hi:
++            return a - lo + off
++    return None
++
++
++addrs = sorted({v for _, pc, lr, _ in rows for v in (vaddr(pc), vaddr(lr)) if v is not None})
++out = subprocess.run([addr2line, "-f", "-C", "-e", binary] + ["%x" % a for a in addrs],
++                     capture_output=True, text=True).stdout.split("\n")
++name = {a: out[2 * i] for i, a in enumerate(addrs)}
++fn = collections.Counter()
++pair = collections.Counter()
++tids = collections.Counter()
++for tid, pc, lr, c in rows:
++    tids[tid] += c
++    if only_tid and tid != only_tid:
++        continue
++    f = name.get(vaddr(pc), "<outside binary: libc / libpython / ...>")
++    fn[f] += c
++    pair[(f, name.get(vaddr(lr), "?"))] += c
++n = sum(fn.values())
++print("samples %d; per thread: %s" % (total, ", ".join("%s=%d" % t for t in tids.most_common())))
++print("\n== functions (%d samples)" % n)
++for f, c in fn.most_common(40):
++    print("%5.1f%% %6d  %s" % (100.0 * c / n, c, f[:150]))
++print("\n== function <- caller (lr)")
++for (f, l), c in pair.most_common(40):
++    print("%5.1f%% %6d  %s  <-  %s" % (100.0 * c / n, c, f[:90], l[:90]))

@@ -1,0 +1,174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sun, 25 Oct 2026 00:09:32 +0300
+Subject: [PATCH 11/14] rusticc: reactor callback profiler
+ (KALIRU_REACTOR_PROF): exclusive cpu per timer / fd callback, python timers
+ by name, status per object
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
+---
+ src/pcprof.rs                | 85 ++++++++++++++++++++++++++++++++++++
+ src/plugins/impls/reactor.rs |  4 +-
+ src/reactor.rs               |  6 ++-
+ src/webhooks.rs              |  5 ++-
+ 4 files changed, 95 insertions(+), 5 deletions(-)
+
+diff --git a/src/pcprof.rs b/src/pcprof.rs
+index 04cf5f7..9ef6a4b 100644
+--- a/src/pcprof.rs
++++ b/src/pcprof.rs
+@@ -92,3 +92,88 @@ pub fn start() {
+         let _ = std::fs::write(&path, out);
+     });
+ }
++
++// Reactor callback profile (KALIRU_REACTOR_PROF=SECS): exclusive thread
++// cpu time and calls per timer / fd callback, logged every SECS seconds. A
++// Rust closure is named by its vtable ("vt@<vtable> <entries>": resolve the
++// entries with addr2line on an unstripped build of the same code), a python
++// timer by its callable ("py:<qualname>"). A callback's nested callbacks
++// (other greenlets while it pauses) are not counted in its time.
++use std::cell::{Cell, RefCell};
++use std::collections::HashMap;
++
++thread_local! {
++    static RP_EVERY: Cell<f64> = Cell::new(match std::env::var("KALIRU_REACTOR_PROF").ok().and_then(|s| s.parse().ok()) {
++        Some(v) => v,
++        None => -1.0,
++    });
++    static RP_STATS: RefCell<HashMap<String, (u64, u64)>> = RefCell::new(HashMap::new());
++    static RP_ACCOUNTED: Cell<u64> = const { Cell::new(0) };
++    static RP_LAST: Cell<f64> = const { Cell::new(0.0) };
++}
++
++fn thread_cpu_ns() -> u64 {
++    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
++    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
++    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
++}
++
++pub fn reactor_prof_enabled() -> bool {
++    RP_EVERY.with(|e| e.get()) > 0.0
++}
++
++/// The profile key of a closure: its vtable and the vtable's entries
++pub fn vtable_key<T: ?Sized>(f: &T) -> String {
++    let p: *const T = f;
++    if std::mem::size_of::<*const T>() != 2 * std::mem::size_of::<usize>() {
++        return "?".into();
++    }
++    let (_, vt): (*const (), *const usize) = unsafe { std::mem::transmute_copy(&p) };
++    let e = |i| unsafe { *vt.add(i) };
++    format!("vt@{:x} {:x},{:x},{:x},{:x}", vt as usize, e(0), e(3), e(4), e(5))
++}
++
++/// Run f as the profiled callback `key`
++pub fn scope<R>(key: impl FnOnce() -> String, f: impl FnOnce() -> R) -> R {
++    if !reactor_prof_enabled() {
++        return f();
++    }
++    let t0 = thread_cpu_ns();
++    let a0 = RP_ACCOUNTED.with(|a| a.get());
++    let r = f();
++    let dt = thread_cpu_ns().saturating_sub(t0);
++    let nested = RP_ACCOUNTED.with(|a| a.get()) - a0;
++    let own = dt.saturating_sub(nested);
++    RP_ACCOUNTED.with(|a| a.set(a.get() + own));
++    RP_STATS.with(|s| {
++        let mut s = s.borrow_mut();
++        let e = s.entry(key()).or_insert((0, 0));
++        e.0 += 1;
++        e.1 += own;
++    });
++    r
++}
++
++/// Log the profile when it is due (the reactor loop calls this)
++pub fn reactor_prof_tick(eventtime: f64) {
++    let every = RP_EVERY.with(|e| e.get());
++    if every <= 0.0 {
++        return;
++    }
++    let last = RP_LAST.with(|l| l.get());
++    if last == 0.0 {
++        RP_LAST.with(|l| l.set(eventtime));
++        return;
++    }
++    if eventtime - last < every {
++        return;
++    }
++    RP_LAST.with(|l| l.set(eventtime));
++    let mut rows: Vec<(String, (u64, u64))> = RP_STATS.with(|s| s.borrow_mut().drain().collect());
++    rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
++    let total: u64 = rows.iter().map(|r| r.1 .1).sum();
++    crate::logging::info(&format!("reactor_prof: {:.1}s window, callbacks {:.3}s cpu", eventtime - last, total as f64 / 1e9));
++    for (k, (n, ns)) in rows.iter().take(40) {
++        crate::logging::info(&format!("reactor_prof: {:8.3}ms {:7} calls {}", *ns as f64 / 1e6, n, k));
++    }
++}
+diff --git a/src/plugins/impls/reactor.rs b/src/plugins/impls/reactor.rs
+index c958977..7665533 100644
+--- a/src/plugins/impls/reactor.rs
++++ b/src/plugins/impls/reactor.rs
+@@ -81,8 +81,10 @@ fn call_reporting(cb: &PyRef, eventtime: f64) -> Option<PyRef> {
+ fn register_timer(a: &Args) -> KResult<PyRef> {
+     let reactor = a.this::<Reactor>()?;
+     let cb = a.arg(0).clone();
++    // (rusticc: KALIRU_REACTOR_PROF names python timers by their callable)
++    let name = format!("py:{}", cb.getattr("__qualname__").and_then(|q| q.as_string()).unwrap_or_else(|_| "?".into()));
+     let timer = reactor.register_timer(
+-        Box::new(move |eventtime| match call_reporting(&cb, eventtime).map(|r| r.as_f64()) {
++        Box::new(move |eventtime| match crate::pcprof::scope(|| name.clone(), || call_reporting(&cb, eventtime)).map(|r| r.as_f64()) {
+             Some(Ok(w)) => w,
+             Some(Err(e)) => {
+                 report_unhandled(&e);
+diff --git a/src/reactor.rs b/src/reactor.rs
+index 60445f8..0db5280 100644
+--- a/src/reactor.rs
++++ b/src/reactor.rs
+@@ -310,7 +310,8 @@ impl Reactor {
+             if eventtime >= waketime {
+                 t.waketime.set(NEVER);
+                 t.timer_is_running.set(true);
+-                waketime = (t.callback.borrow_mut())(eventtime);
++                // (rusticc: KALIRU_REACTOR_PROF, pcprof.rs)
++                waketime = crate::pcprof::scope(|| crate::pcprof::vtable_key(&**t.callback.borrow()), || (t.callback.borrow_mut())(eventtime));
+                 t.waketime.set(waketime);
+                 t.timer_is_running.set(false);
+                 if !same(&g_dispatch, &self.g_dispatch.borrow()) {
+@@ -541,7 +542,7 @@ impl Reactor {
+             let hdl = self.fds.borrow().get(&fd).cloned().unwrap_or_else(|| self.dummy_fd_hdl.clone());
+             if event & self.read_mask != 0 {
+                 let cb = hdl.read_callback.clone();
+-                cb(eventtime);
++                crate::pcprof::scope(|| crate::pcprof::vtable_key(&*cb), || cb(eventtime));
+                 if !same(&g_dispatch, &self.g_dispatch.borrow()) {
+                     self.end_greenlet(g_dispatch.unwrap());
+                     return self.monotonic();
+@@ -588,6 +589,7 @@ impl Reactor {
+             busy = false;
+             let res = self.poll((timeout * 1000.0).ceil() as i32);
+             eventtime = self.monotonic();
++            crate::pcprof::reactor_prof_tick(eventtime);
+             if !res.is_empty() {
+                 busy = true;
+                 eventtime = self.check_fds(eventtime, &res);
+diff --git a/src/webhooks.rs b/src/webhooks.rs
+index 91aaf67..4a519ae 100644
+--- a/src/webhooks.rs
++++ b/src/webhooks.rs
+@@ -976,10 +976,11 @@ impl QueryStatusHelper {
+                 let sub = subscription.borrow();
+                 for (obj_name, req) in sub.iter() {
+                     if !query.contains_key(obj_name) {
+-                        let res = match self.printer.lookup_object_opt(obj_name) {
++                        // (rusticc: KALIRU_REACTOR_PROF times each object's status)
++                        let res = crate::pcprof::scope(|| format!("status:{}", obj_name), || match self.printer.lookup_object_opt(obj_name) {
+                             Some(po) if po.has_status() => Status::of(&*po, eventtime),
+                             _ => Status::Val(PyVal::dict()),
+-                        };
++                        });
+                         query.insert(obj_name.clone(), res);
+                     }
+                     let res = &query[obj_name];
