@@ -10,7 +10,29 @@ behaviour, less CPU and memory.
 
 COSMOS builds Kalico and Moonraker with its own patch sets; Rusticc builds kaliru and Moonruster with its own the
 same way. kaliru and Moonruster stay plain ports of their originals, and everything Rusticc-specific lives here.
-(The Moonruster recipe, `meta-rusticc/recipes-apps/moonruster`, is in progress.)
+
+## Using Rusticc on a printer
+
+Rusticc installs like a COSMOS update: an `.swu` image, written to the printer's inactive A/B slot, active from
+the next reboot. Everything you configured stays: `printer.cfg`, `cosmos.conf`, your plugins (AFC, ACE, ...),
+macros and the COSMOS slicer profiles all work unchanged, because Rusticc keeps COSMOS's configuration, file
+layout and macro names.
+
+- **Install** from a COSMOS printer's shell: copy the image over and run COSMOS's installer, then reboot:
+  ```sh
+  flash /user-resource/rusticc-cc1.swu   # writes the other slot; "Update finished, run 'reboot'"
+  reboot
+  ```
+  At the first boot the bed and toolhead boards are flashed with Rusticc's MCU firmware (the same check COSMOS
+  uses: their firmware version differs); the mainboard DSP loads Rusticc's firmware from the image.
+- **Check what runs:** the login banner and `/etc/os-release` say Rusticc; `klippy.log` starts with
+  `App Name: Rusticc`; Mainsail / Fluidd show the Rusticc version.
+- **Updates:** the web UI's update manager and `check-update` look at github.com/Rusti3D/rusticc releases
+  (`check_for_updates` in `cosmos.conf` turns this off).
+- **Going back to COSMOS:** install a COSMOS `.swu` the same way (`flash cosmos-centauri-carbon-1.swu`); its first
+  boot flashes COSMOS's MCU firmware back. The previous slot can also be booted directly:
+  `fw_setenv mmc_root /dev/mmcblk0p5; fw_setenv boot_part 4; fw_setenv systemAB_next A; reboot` (slot A; for slot B
+  use `/dev/mmcblk0p8`, `7`, `B`).
 
 ## Layout
 
@@ -19,6 +41,7 @@ same way. kaliru and Moonruster stay plain ports of their originals, and everyth
 | `cosmos/` | COSMOS (submodule, pinned), with its own submodules (poky, meta-oe, meta-sunxi, ...) |
 | `meta-rusticc/` | the Yocto layer on top of COSMOS's meta-opencentauri: only what differs |
 | `meta-rusticc/recipes-apps/rusticc/` | Rusticc's klippy: kaliru + `files/kaliru/*.patch` (Rusticc's patches) |
+| `meta-rusticc/recipes-apps/moonruster/` | Moonruster (Moonraker in Rust) with Rusticc's patches, in place of COSMOS's Moonraker |
 | `meta-rusticc/recipes-apps/klipper/` | COSMOS's klipper service running Rusticc; the MCU firmware swapped for kaliru-mcu (prebuilt in `files/rusticc-firmware`) |
 | `meta-rusticc/recipes-*/` | branding: boot logo, splash, Fluidd theme, login banner, distro name |
 | `branding/` | `Rusticc.png` and `make_assets.py`, which makes every image the layer uses |
