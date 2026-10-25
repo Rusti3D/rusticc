@@ -15,12 +15,12 @@ do_install:append() {
 # The Mainsail Panel Extender (from cosmoace_afc, with page panels) in
 # /var/www/addons, which Moonruster serves at /addons (addons_path, next to
 # /user-resource/webui-addons for runtime-installed addons); the theme
-# script adds its <script> to index.html. Its panels: Rusticc's timelapse on
-# the Webcam page (rendering in the browser: the printer has no ffmpeg).
+# script adds its <script> to index.html. Rusticc's timelapse panels
+# (panels/timelapse) are not installed until timelapse is finished
+# (docs/TIMELAPSE.md).
 SRC_URI += "file://panel-extender"
 do_install:append() {
-    install -d ${D}/var/www/addons/panels/timelapse
+    install -d ${D}/var/www/addons/panels
     install -m 0644 ${UNPACKDIR}/panel-extender/loader.js ${D}/var/www/addons/
-    install -m 0644 ${UNPACKDIR}/panel-extender/panels/timelapse/panel.js ${D}/var/www/addons/panels/timelapse/
 }
 FILES:${PN} += "/var/www/addons"

@@ -6,9 +6,9 @@
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 RDEPENDS:${PN} = "moonruster curl kalico"
 
-# The [timelapse] section, through moonraker.conf's
-# [include moonraker-readonly/*.conf]
-SRC_URI += "file://timelapse.conf"
+# Timelapse is disabled until it is finished (docs/TIMELAPSE.md): no
+# [timelapse] section (files/timelapse.conf), so Moonruster's component
+# (patch 0005) does not load.
 
 do_install() {
     install -d ${D}${sysconfdir}/klipper/config/moonraker-readonly
@@ -19,7 +19,6 @@ do_install() {
     sed -i 's|^web_client: .*|&\naddons_path:\n    /var/www/addons\n    /user-resource/webui-addons|' \
         ${D}${sysconfdir}/klipper/config/moonraker-readonly/moonraker.conf
     grep -q '^addons_path:' ${D}${sysconfdir}/klipper/config/moonraker-readonly/moonraker.conf
-    install -m 0644 ${UNPACKDIR}/timelapse.conf ${D}${sysconfdir}/klipper/config/moonraker-readonly/
     install -m 0644 ${UNPACKDIR}/moonraker.asvc ${D}${sysconfdir}/klipper/
     ln -sf /user-resource/gcodes ${D}${sysconfdir}/klipper/gcodes
     ln -sf /board-resource ${D}${sysconfdir}/klipper/logs
@@ -28,5 +27,4 @@ do_install() {
 }
 
 FILES:${PN}:remove = "${datadir}/moonraker"
-FILES:${PN} += "${sysconfdir}/klipper/config/moonraker-readonly/timelapse.conf"
 

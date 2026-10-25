@@ -15,14 +15,8 @@ do_install:append() {
         ${D}${sysconfdir}/klipper/config/klipper-readonly/shell.cfg
 }
 
-# moonraker-timelapse c7fff11's macros (klipper_macro/timelapse.cfg) for
-# Moonruster's timelapse component; klipper-readonly/*.cfg is included by
-# printer.cfg. A frame per layer needs TIMELAPSE_TAKE_FRAME in the slicer's
-# layer-change G-code.
-SRC_URI += "file://timelapse.cfg"
-do_install:append() {
-    install -m 0644 ${UNPACKDIR}/timelapse.cfg ${D}${sysconfdir}/klipper/config/klipper-readonly/
-}
+# Timelapse is disabled until it is finished (docs/TIMELAPSE.md): its
+# macros, files/timelapse.cfg, are not installed.
 
 # klippy's python packages that kaliru replaces and no python plugin imports
 # (its greenlets, msgspec and CAN tooling are Rust). Kept for python plugins:
