@@ -4,3 +4,13 @@
 # (klipper), started with Rusticc instead of python3 klippy.py
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 RDEPENDS:${PN} += "rusticc"
+
+# The prompts COSMOS's macros show by name: Rusticc's. (Macro names such as
+# _COSMOS_SETTINGS / UPDATE_COSMOS and the "COSMOS OrcaSlicer profile" a
+# print needs stay: configs and slicer profiles call them.)
+do_install:append() {
+    sed -i -e 's/Welcome to COSMOS!/Welcome to Rusticc!/' \
+        ${D}${sysconfdir}/klipper/config/klipper-readonly/calibration.cfg
+    sed -i -e 's/while COSMOS is updated/while Rusticc is updated/' \
+        ${D}${sysconfdir}/klipper/config/klipper-readonly/shell.cfg
+}
