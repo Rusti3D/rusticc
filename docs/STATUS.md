@@ -32,6 +32,24 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
   Rust-AFC's config/ace in extras-readonly/afc-ace/, the camera at 1280x720/15 fps and the trim (no Fluidd,
   AtomScreen, Doom; UI fallbacks), Moonruster as before (no timelapse yet: the Moonruster session's). Not installed: the
   CC1 was printing; the user decides.
+- [ ] Image space (user, 2026-10-25): the root slot is fixed at 131125 KiB (~134.3 MB, the stock eMMC layout
+  COSMOS keeps: rootfsA/B, 8 GB eMMC with ~6.9 GB UDISK at /user-resource); image 59fb371c7c's squashfs is
+  117.8 MB, 262 MB unpacked, of which /usr/lib/python3.15 is 125 MB.
+  - Now (user: Moonraker "shouldn't ship with rusticc at all"): drop /usr/share/moonraker and Moonraker's python
+    packages (aiofiles apprise dbus_fast distro importlib_metadata zipp inotify_simple ldap3 libnacl paho_mqtt
+    periphery pillow preprocess_cancellation pyserial_asyncio smart_open streaming_form_data tornado uvloop
+    zeroconf ifaddr, and the unclaimed pyyaml certifi pycurl async_timeout aenum msgpack tomli tomli_w), ~30 MB
+    unpacked; also greenlet, msgspec, python-can + packaging + typing_extensions + wrapt (~6 MB): kaliru
+    imports none of them and no plugin in the corpus does. Waiting on the Moonruster session: does Moonruster
+    load python Moonraker components that need any of them?
+  - Kept for python plugin compatibility (imported by plugins, not by kaliru): the stdlib + libpython, numpy
+    35 MB (Shake&Tune, Beacon, Cartographer, Happy Hare), pyserial (Happy Hare, cosmoace_afc), jinja2 +
+    markupsafe (Happy Hare), cffi + pycparser (chelper.get_ffi users).
+  - When cutting again (user: "note it for when/if we need to start cutting again"; later Rust rewrites to
+    save space and resources): numpy to /user-resource (an optional sys.path dir, installed by the update or on
+    demand), or the plugins that need it rewritten in Rust; Python dev tooling (setuptools, idlelib,
+    pydoc_data, ensurepip, ~16 MB); git (7 MB, if nothing needs it). Bigger root slots need a repartition and a
+    full reflash (wipes /user-resource, breaks stock tools' layout): decide with Rusticc's own installer.
 - [ ] Later (user, 2026-10-25): Rusticc's own installer, "not just reuse cosmos. We cant assume everyone is
   coming from cosmos, this will branch eventually." Today the .swu is a repack of a COSMOS slot, signed with
   COSMOS's swupdate key and installed with COSMOS's `flash`: it needs a COSMOS printer. To plan: install paths
