@@ -28,8 +28,9 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
   ACE runout reworked with the user (cosmoace_afc 09b9cc3, a local branch until the user pushes it): reload
   of a paused runout lane, empty-slot eject, an unloaded lane stays loadable. Gate (ACE_SRC = that checkout):
   cases 171/172 (printers/13 as before), cc1 1/1, canvas_cmp 9/9, ace_cmp 4/4, plugin_cmp 8/8, clippy 0;
-  armv7 rusticc sha256 c883a8fc. Image: work/repack/repack.sh (Moonruster as before, no timelapse yet: the
-  Moonruster session's); installs Rust-AFC's config/ace into extras-readonly/afc-ace/. Not installed: the
+  armv7 rusticc sha256 c883a8fc. Image 59fb371c7c (sha256 ef396b61, 130.7 MB): work/repack/repack.sh with
+  Rust-AFC's config/ace in extras-readonly/afc-ace/, the camera at 1280x720/15 fps and the trim (no Fluidd,
+  AtomScreen, Doom; UI fallbacks), Moonruster as before (no timelapse yet: the Moonruster session's). Not installed: the
   CC1 was printing; the user decides.
 - [ ] Later (user, 2026-10-25): Rusticc's own installer, "not just reuse cosmos. We cant assume everyone is
   coming from cosmos, this will branch eventually." Today the .swu is a repack of a COSMOS slot, signed with
