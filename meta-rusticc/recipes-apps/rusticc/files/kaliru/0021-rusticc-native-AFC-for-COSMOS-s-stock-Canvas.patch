@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 15:20:10 +0200
-Subject: [PATCH 21/21] rusticc: native AFC for COSMOS's stock Canvas
+Subject: [PATCH 21/22] rusticc: native AFC for COSMOS's stock Canvas
 
 AFC, AFC_prep, AFC_hub, AFC_extruder, AFC_canvas and AFC_canvas_lane
 in Rust (src/extras/afc), with the modules they pull in (functions, lane,

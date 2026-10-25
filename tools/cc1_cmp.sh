@@ -1,28 +1,35 @@
 #!/bin/bash
 # Rusticc before it goes on the printer: the user's CC1 config
-# (Originals_Base/addons/cc1_config: AFC, AFC_ACE, knock) in
+# (work/cc1_live from tools/cc1_pull.sh, else Originals_Base/addons/cc1_config:
+# AFC, AFC_ACE) in
 # batch mode against the CC1's own MCU dictionaries (dicts/), with the
 # COSMOS reference (ref_setup.sh) and with Rusticc, diffed like case_cmp.sh.
 # The config is staged in ~/rk/cc1_stage (/etc/klipper paths point there),
 # fresh for each side; the addons go into the reference's klippy for the run.
-# usage: [CANVAS=1] cc1_cmp.sh [extra gcode file]
+# usage: [CANVAS=1] [ACE=slots] cc1_cmp.sh [extra gcode file]
 # CANVAS=1: COSMOS's stock config with the Elegoo Canvas (AFC_canvas) instead
+# ACE=ready:PLA,empty,... [ACE_EVENTS=secs:slot:state,...]: a fake ACE Pro (tools/fake_ace.py) on the unit's
+# serial, a fresh one for each side; ACE_OFFLINE_LOADS=1 lets loads run
+# offline (see below)
 set -e
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 # (in the kaliru tree with the Rusticc patches: tools/kaliru-tree.sh)
 cd "${KALIRU:-$HERE/work/kaliru}"
 ADDONS=${ADDONS:-$(realpath "$HERE/../Originals_Base/addons")}
+LIVE=$HERE/work/cc1_live
+if [ -d "$LIVE" ]; then CONFIG=$LIVE/config; PLUGINS=$LIVE/plugins; else CONFIG=$ADDONS/cc1_config/config; PLUGINS=$ADDONS/plugins; fi
 REF=~/rk/cosmos_ref
 STAGE=~/rk/cc1_stage
 cp "$HERE"/dicts/*.dict /ci_build/dict/
 installed=()
 for f in "$ADDONS"/afc_extras/*.py; do cp "$f" $REF/klippy/extras/; installed+=("$REF/klippy/extras/$(basename "$f")"); done
-for f in AFC_ACE knock; do cp -r "$ADDONS/plugins/$f" $REF/klippy/plugins/; installed+=("$REF/klippy/plugins/$f"); done
-trap 'rm -rf "${installed[@]}"' EXIT
+cp -r "$PLUGINS/AFC_ACE" $REF/klippy/plugins/; installed+=("$REF/klippy/plugins/AFC_ACE")
+fake=
+trap 'rm -rf "${installed[@]}"; [ -n "$fake" ] && kill $fake' EXIT
 stage() {
     rm -rf $STAGE
     mkdir -p $STAGE/gcodes
-    cp -r "$ADDONS/cc1_config/config" $STAGE/config
+    cp -r "$CONFIG" $STAGE/config
     ln -s $REF/klippy/plugins $STAGE/plugins
     grep -rl /etc/klipper $STAGE/config | xargs -r sed -i "s#/etc/klipper#$STAGE#g"
     # batch mode treats a non-critical MCU as absent; on the printer the bed
@@ -43,6 +50,24 @@ stage() {
         dicts="$dicts canvas=cc1_canvas.dict"
         # a fresh install's AFC state, not the user's ACE lanes
         echo "{}" > $STAGE/config/AFC.var.unit
+    fi
+    if [ -n "$ACE" ]; then
+        [ -n "$fake" ] && kill $fake && wait $fake 2>/dev/null
+        python3 "$HERE/tools/fake_ace.py" $STAGE/ace_tty --slots "$ACE" --events "$ACE_EVENTS" --speedup ${ACE_SPEEDUP:-20} & fake=$!
+        sed -i "s#^serial: /dev/serial/by-path/.*#serial: $STAGE/ace_tty#" $STAGE/config/printer.cfg
+        # ACE_FRESH=1: a fresh install's AFC state, not the printer's lanes
+        if [ -n "$ACE_FRESH" ]; then echo "{}" > $STAGE/config/AFC.var.unit; fi
+        if [ -n "$ACE_OFFLINE_LOADS" ]; then
+            # batch mode reads no temperatures or sensors: loads skip the
+            # heat-up (0 C materials, cold extrusion allowed) and feed blind
+            sed -i "/^pin_tool_start:/d" $REF/klippy/plugins/AFC_ACE/config/cc1-head.cfg
+            printf '
+[AFC]
+default_material_temps: default:0, PLA:0, PETG:0
+[extruder]
+min_extrude_temp: 0
+' >> $STAGE/config/printer.cfg
+        fi
     fi
     {
         echo "CONFIG config/printer.cfg"

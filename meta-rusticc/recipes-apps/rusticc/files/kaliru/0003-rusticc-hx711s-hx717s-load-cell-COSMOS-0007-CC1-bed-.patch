@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sat, 24 Oct 2026 19:07:31 +0300
-Subject: [PATCH 03/21] rusticc: hx711s / hx717s load cell (COSMOS 0007), CC1
+Subject: [PATCH 03/22] rusticc: hx711s / hx717s load cell (COSMOS 0007), CC1
  bed dictionary
 
 - extras/load_cell/hx711s.rs: up to 4 HX711/HX717 chips as one load cell

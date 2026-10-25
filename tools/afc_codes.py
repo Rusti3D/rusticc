@@ -3,7 +3,8 @@
 # "[file:function():co_firstlineno]" on every line, so the native AFC passes
 # the same triple for each Python function it ports. Generated from the
 # reference sources so no number is typed by hand.
-#   afc_codes.py <afc_extras dir> > src/extras/afc/codes.rs
+#   afc_codes.py <afc_extras dir> [plugin .py ...] > src/extras/afc/codes.rs
+# (plugins: AFC_ACE.py, the cosmoace_afc unit)
 import ast
 import pathlib
 import re
@@ -46,9 +47,10 @@ def main():
     print("use super::logger::Code;")
     print()
     seen = set()
-    for module in MODULES:
-        fname = module + ".py"
-        tree = ast.parse((src / fname).read_text())
+    files = [src / (m + ".py") for m in MODULES] + [pathlib.Path(p) for p in sys.argv[2:]]
+    for path in files:
+        module, fname = path.stem, path.name
+        tree = ast.parse(path.read_text())
         out = []
         walk(tree, module, fname, [], out)
         for name, f, func, line in out:

@@ -8,7 +8,7 @@ LIC_FILES_CHKSUM = "file://COPYING;md5=1ebbd3e34237af26da5dc08a4e440464"
 # as COSMOS builds Kalico with its own: files/kaliru, listed by
 # rusticc-patches.inc (tools/kaliru-tree.sh / kaliru-export.sh)
 SRC_URI = "git://github.com/Rusti3D/kaliru.git;protocol=https;branch=main"
-SRCREV = "ce214e36d59961693d7cfb7d4fd2dad48b1f1f5a"
+SRCREV = "a89322765a98264fd03d0435e1430c8c507cf05c"
 PV = "0.1.0+git"
 
 require rusticc-patches.inc

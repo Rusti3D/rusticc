@@ -4,7 +4,10 @@
 # answers get_status, feed/unwind (a move takes length/speed/SPEEDUP seconds),
 # the stops, feed assist and the dryer.
 #   fake_ace.py LINK [--slots ready,empty,ready,empty] [--speedup 20]
-# LINK is made a symlink to the pty: the config's [AFC_ACE] serial.
+#               [--events SECS:SLOT:STATE[:MATERIAL],...]
+# LINK is made a symlink to the pty: the config's [AFC_ACE] serial. Events
+# change a slot (a spool put in or taken out) SECS after the first motion
+# command (batch mode's G4 does not wait in real time; a slow LANE_MOVE does).
 import argparse
 import json
 import os
@@ -32,16 +35,30 @@ def frame(payload):
 
 
 class Ace:
-    def __init__(self, slots, speedup):
+    def __init__(self, slots, speedup, events):
         self.speedup = speedup
-        self.slots = []
-        for i, s in enumerate(slots):
-            kind, _, material = s.partition(":")
-            self.slots.append({"index": i, "status": kind, "sku": "", "rfid": 2 if material else 1,
-                               "type": material, "color": COLORS.get(material, [0, 0, 0])})
+        self.slots = [self.slot(i, s) for i, s in enumerate(slots)]
+        self.events = sorted(events)
+        self.started = None
         self.motion = {}  # slot -> (state, ends at)
         self.dryer = {"status": "stop", "target_temp": 0, "duration": 0, "remain_time": 0}
         self.assist = None
+
+    @staticmethod
+    def slot(i, spec):
+        kind, _, material = spec.partition(":")
+        return {"index": i, "status": kind, "sku": "", "rfid": 2 if material else 1,
+                "type": material, "color": COLORS.get(material, [0, 0, 0])}
+
+    def run_events(self, method):
+        if self.started is None:
+            if method == "get_status":
+                return
+            self.started = time.monotonic()
+        while self.events and time.monotonic() - self.started >= self.events[0][0]:
+            _, index, spec = self.events.pop(0)
+            self.motion.pop(index, None)
+            self.slots[index] = self.slot(index, spec)
 
     def status(self):
         now = time.monotonic()
@@ -60,6 +77,7 @@ class Ace:
                 "slots": [dict(s) for s in self.slots]}
 
     def call(self, method, p):
+        self.run_events(method)
         if method == "get_status":
             return self.status()
         index = p.get("index", 0)
@@ -91,8 +109,13 @@ def main():
     ap.add_argument("link")
     ap.add_argument("--slots", default="ready:PLA,empty,ready:PETG,empty")
     ap.add_argument("--speedup", type=float, default=20.0)
+    ap.add_argument("--events", default="")
     args = ap.parse_args()
-    ace = Ace(args.slots.split(","), args.speedup)
+    events = []
+    for e in filter(None, args.events.split(",")):
+        secs, index, spec = e.split(":", 2)
+        events.append((float(secs), int(index), spec))
+    ace = Ace(args.slots.split(","), args.speedup, events)
     master, slave = pty.openpty()
     tty.setraw(slave)
     if os.path.lexists(args.link):

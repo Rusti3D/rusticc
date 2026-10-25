@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 03:06:58 +0200
-Subject: [PATCH 13/21] firmware: COSMOS MCU patches in Rust (drv8833, hx711s,
+Subject: [PATCH 13/22] firmware: COSMOS MCU patches in Rust (drv8833, hx711s,
  stm32 RS-485 DE pin)
 
 - src/drv8833.rs: COSMOS 0003 drv8833.c (hall speed PID / manual duty)

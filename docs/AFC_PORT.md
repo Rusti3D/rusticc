@@ -176,3 +176,32 @@ line saying why), so an ACE / BoxTurtle / toolchanger setup keeps working.
 - Without a log file (batch tests) AFC logs through the root logger, so its
   lines are in klippy.log; Python tracebacks inside them (CalledProcessError
   from print_version's git calls) need frame normalisation in refdiff.
+
+## Stage 2: cosmoace_afc, the ACE units (user, 2026-10-25)
+
+"a native rust afc build for cosmoace_afc": the user's CC1 runs the
+cosmoace_afc plugin (`plugins/AFC_ACE`, AFC_ACE.py, identical on the printer
+and in `Originals_Base`). Native files: `ace.rs` (afcACE, AceSetup, the dryer
+heater and humidity sensor) and `ace_transport.rs` (AceTransport, the ACE
+Pro's thread with its framed JSON; Ace2Bus / Ace2Transport, the ACE 2's shared
+RS-485 bus with protobuf). Each transport runs on its own thread as in Python;
+the reactor submits requests and polls them with `reactor.pause`.
+
+- Scope: `[AFC_ACE]`, `[AFC_ACE <unit>]` and `[AFC_lane]` sections of an ACE
+  unit (or an override without a unit line) are native too; the plugin
+  directory is then skipped (printer.rs load_py_modules). AFC_lane lanes of any
+  other unit, a selector, step_pin, buffer or LED index keep the Python AFC.
+- AFC core hooks Canvas did not need: `unit_load_lane` / `unit_unload_lane`
+  (load_sequence / unload_sequence), `get_lane_reset_command` (AFC_LANE_RESET),
+  stepperless `lane_move` (move_advanced), "ACE" in ONLY_LOAD_TYPES and
+  EXCLUDE_TYPES (the plugin appends it at import), the base afcUnit LED states
+  and calibration prompts.
+- AFC.log frame data: `tools/afc_codes.py <afc_extras> <AFC_ACE.py>`.
+- Parity: `tools/ace_cmp.sh` runs the CC1 config against `tools/fake_ace.py`
+  (an ACE Pro on a pty; `--events` puts spools in or takes them out). Batch mode
+  has no temperatures or sensor readings, so `ACE_OFFLINE_LOADS=1` lets loads
+  run (0 C materials, cold extrusion, no toolhead sensor). The serial thread's
+  log lines compare as their own sequence (refdiff), its `t=` and durations
+  masked; AFC's Δt timings and the shutdown stop burst too.
+- The reference venv's pyserial is 3.5, as on COSMOS (3.4 doubles "read
+  failed:" on a disconnected device).

@@ -7,10 +7,15 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
 
 - [x] Full AFC parity where Rusticc needs it: native AFC for COSMOS's stock Canvas (patch 0021, docs/AFC_PORT.md).
   9/9 batch Canvas runs identical (`tools/canvas_cmp.sh`); drv8833 lane moves can't run in batch (no MCU replies).
-- [ ] A native Rust AFC build for cosmoace_afc (AFC_ACE, the user's CC1 config).
+- [x] A native Rust AFC build for cosmoace_afc (AFC_ACE, the user's CC1 config): patch 0022 (`ace.rs`,
+  `ace_transport.rs`); `tools/ace_cmp.sh` 4/4 identical against a fake ACE (docs/AFC_PORT.md stage 2).
 - [ ] Then the real Rusticc build, for the user to try on the printer (install only with their go).
 - [ ] Address any issues; then full AFC parity as its own project (rust afc).
 - [ ] Gaps in Rusticc / kaliru: camera support, "nothing should be breaking on my cc1".
+  - Camera: klipper side done (CAMERA_LIGHT_* shell commands, kaliru ce214e3); Moonruster's [webcam] and
+    `[server] webcam_redirect` asked of the Moonruster session (2026-10-25).
+  - Python AFC on kaliru with a Canvas (use_python_modules): the plugin layer lacks PrinterPins.setup_pin
+    (+ MCU_digital_out / MCU_pwm) - a genuine kaliru fix (docs/AFC_PORT.md "Found on the way").
 
 ## How the code is organised
 
@@ -28,7 +33,7 @@ the host patches 0001-remove-save-config-subfile-check, 0002-reduce-calibration-
 0001-Reduce-log-rotate-threshold, 0001-implement-pulldown-resistor-in-thermistor-calc, 0001-probe-home-z-includes-z-offset,
 0001-force-specific-input-shaper, 0004-allow-config-exclude, and the hx711s/hx717s load cell (0007). The full case set
 (Kalico tests + kaliru cases + Rusticc cases) is 171/172 identical (printers/13 is a known timing case); the CC1
-config and the plugin cases are identical too. The tree is kaliru main ce214e3 + patches 0001-0021.
+config and the plugin cases are identical too. The tree is kaliru main a893227 + patches 0001-0022.
 
 `tools/cc1_cmp.sh` runs the user's CC1 config (AFC, AFC_ACE, knock) in batch mode with the printer's own MCU
 dictionaries (`dicts/`). Startup is identical to COSMOS. `CANVAS=1 tools/cc1_cmp.sh cases/cc1_canvas.gcode` runs

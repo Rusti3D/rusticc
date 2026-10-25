@@ -21,4 +21,5 @@ SRC_URI += " \
     file://kaliru/0019-rusticc-drop-the-timed-log-rotation-COSMOS-replaced-.patch \
     file://kaliru/0020-rusticc-clippy-in-the-profiler-and-git-status-helper.patch \
     file://kaliru/0021-rusticc-native-AFC-for-COSMOS-s-stock-Canvas.patch \
+    file://kaliru/0022-rusticc-native-AFC-for-cosmoace_afc-the-ACE-Pro-ACE-.patch \
 "

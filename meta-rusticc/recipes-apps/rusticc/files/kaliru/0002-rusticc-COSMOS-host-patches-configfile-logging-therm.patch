@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sat, 24 Oct 2026 18:54:57 +0300
-Subject: [PATCH 02/21] rusticc: COSMOS host patches (configfile, logging,
+Subject: [PATCH 02/22] rusticc: COSMOS host patches (configfile, logging,
  thermistor, probe, shaper, load cell)
 
 - 0001-remove-save-config-subfile-check: no autosave strip on load, no
