@@ -10,10 +10,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 7 insertions(+)
 
 diff --git a/src/webhooks.rs b/src/webhooks.rs
-index 44382cc..7ba4e39 100644
+index e52a65f..15c40e6 100644
 --- a/src/webhooks.rs
 +++ b/src/webhooks.rs
-@@ -983,6 +983,13 @@ impl QueryStatusHelper {
+@@ -989,6 +989,13 @@ impl QueryStatusHelper {
                      }
                      logging::info(&format!("debug_subs: {}", parts.join(" ")));
                  }

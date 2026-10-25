@@ -22,6 +22,15 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
   (slot B; slot A kept as stock COSMOS 20b31d0226). Image: rusticc e04cb3e8, Moonruster 02ae9c27.
 - [ ] 0.0.2 built locally, NOT released (user: "It can go in the next iteration"): Moonruster's logs name it
   (rusticc 9d83ae1, Moonruster patch 0004; Moonruster e0589681), image d12147cc. Release with the next batch.
+- [x] AFC as Rust-AFC (2026-10-25): the native AFC (Canvas, ACE Pro / ACE 2) moved out of patches 0021/0022
+  into the Rust-AFC crate (github.com/Rusti3D/Rust-AFC 3ea26b1), built in by the rusticc crate (patch 0023,
+  `rusticc/`, kaliru d0f37ad's native plugin API); the binary is /usr/bin/rusticc from `tools/build_cc1.sh`.
+  ACE runout reworked with the user (cosmoace_afc 09b9cc3, a local branch until the user pushes it): reload
+  of a paused runout lane, empty-slot eject, an unloaded lane stays loadable. Gate (ACE_SRC = that checkout):
+  cases 171/172 (printers/13 as before), cc1 1/1, canvas_cmp 9/9, ace_cmp 4/4, plugin_cmp 8/8, clippy 0;
+  armv7 rusticc sha256 c883a8fc. Image: work/repack/repack.sh (Moonruster as before, no timelapse yet: the
+  Moonruster session's); installs Rust-AFC's config/ace into extras-readonly/afc-ace/. Not installed: the
+  CC1 was printing; the user decides.
 - [ ] Later (user, 2026-10-25): Rusticc's own installer, "not just reuse cosmos. We cant assume everyone is
   coming from cosmos, this will branch eventually." Today the .swu is a repack of a COSMOS slot, signed with
   COSMOS's swupdate key and installed with COSMOS's `flash`: it needs a COSMOS printer. To plan: install paths

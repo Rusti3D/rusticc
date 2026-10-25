@@ -15,7 +15,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 tools/pcprof_report.py
 
 diff --git a/src/lib.rs b/src/lib.rs
-index e304216..4f23cc9 100644
+index 0e6dbae..39df338 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -45,6 +45,7 @@ pub mod kinematics;
@@ -114,10 +114,10 @@ index 0000000..5f9fd3e
 +    });
 +}
 diff --git a/src/printer.rs b/src/printer.rs
-index 7b8b959..f81385c 100644
+index 02ac0fc..4465631 100644
 --- a/src/printer.rs
 +++ b/src/printer.rs
-@@ -839,6 +839,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
+@@ -875,6 +875,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
  
  pub fn main() {
      crate::util::fix_sigint();

@@ -87,7 +87,7 @@ index 73ae67f..45cb3e8 100644
  /// ported yet
  pub static KINEMATICS: &[(&str, Option<LoadKinematics>)] = &[
 diff --git a/src/printer.rs b/src/printer.rs
-index 3121953..7b8b959 100644
+index 8396138..02ac0fc 100644
 --- a/src/printer.rs
 +++ b/src/printer.rs
 @@ -26,7 +26,8 @@ use std::any::Any;

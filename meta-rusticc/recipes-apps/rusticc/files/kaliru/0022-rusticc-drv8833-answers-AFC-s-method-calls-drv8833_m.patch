@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shawn-makes-stuff <shawn.rains@rocketmail.com>
+Date: Sun, 25 Oct 2026 20:05:26 +0200
+Subject: [PATCH 22/23] rusticc: drv8833 answers AFC's method calls
+ (drv8833_move, drv8833_set_speed, active)
+
+Rust-AFC's Canvas lanes drive the motor through the printer object by
+name, as the python AFC does; the native AFC that called it directly
+(patch 0021) is now the Rust-AFC crate.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
+---
+ src/extras/drv8833.rs | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/extras/drv8833.rs b/src/extras/drv8833.rs
+index d3caf2e..ce260b6 100644
+--- a/src/extras/drv8833.rs
++++ b/src/extras/drv8833.rs
+@@ -843,6 +843,20 @@ impl PrinterDrv8833 {
+ }
+ 
+ impl PrinterObject for PrinterDrv8833 {
++    /// AFC's Canvas lanes (python or native plugin) drive the motor by name:
++    /// drv8833_move(speed, distance, wait_for_completion),
++    /// drv8833_set_speed(speed) and the .active attribute
++    fn call_method(&self, name: &str, args: &[PyVal]) -> Option<KResult<PyVal>> {
++        let f = |i: usize| args.get(i).and_then(PyVal::as_f64).unwrap_or(0.0);
++        Some(match name {
++            "drv8833_move" => {
++                self.drv8833_move(f(0), f(1), args.get(2).is_some_and(PyVal::truthy)).map(|_| PyVal::None)
++            }
++            "drv8833_set_speed" => self.drv8833_set_speed(f(0)).map(|_| PyVal::None),
++            "active" => Ok(PyVal::Bool(self.active.get())),
++            _ => return None,
++        })
++    }
+     fn has_status(&self) -> bool {
+         true
+     }

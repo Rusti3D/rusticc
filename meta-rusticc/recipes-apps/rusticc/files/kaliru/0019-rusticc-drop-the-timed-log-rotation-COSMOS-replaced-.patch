@@ -15,11 +15,11 @@ Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
  docs/PARITY.md      |   2 +-
  src/bin/qltest.rs   |  15 ----
  src/pcprof.rs       |   2 +-
- src/queuelogger.rs  | 199 +-------------------------------------------
+ src/queuelogger.rs  | 206 +-------------------------------------------
  tools/check_all.sh  |   1 -
  tools/ql_cmp.sh     |  13 ---
- tools/qltest_ref.py |  14 ----
- 8 files changed, 4 insertions(+), 246 deletions(-)
+ tools/qltest_ref.py |  14 ---
+ 8 files changed, 4 insertions(+), 253 deletions(-)
  delete mode 100644 src/bin/qltest.rs
  delete mode 100644 tools/ql_cmp.sh
  delete mode 100644 tools/qltest_ref.py
@@ -87,7 +87,7 @@ index c748a94..5298465 100644
              libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
              let tv = libc::timeval { tv_sec: 0, tv_usec: 2000 };
 diff --git a/src/queuelogger.rs b/src/queuelogger.rs
-index d2bc26d..3ce0201 100644
+index 472740c..e2e6469 100644
 --- a/src/queuelogger.rs
 +++ b/src/queuelogger.rs
 @@ -1,8 +1,6 @@
@@ -101,7 +101,7 @@ index d2bc26d..3ce0201 100644
  //
  // Copyright (C) 2016-2019  Kevin O'Connor <kevin@koconnor.net>
  //
-@@ -14,177 +12,10 @@ use std::io::{Seek, SeekFrom, Write};
+@@ -14,184 +12,10 @@ use std::io::{Seek, SeekFrom, Write};
  use std::sync::mpsc;
  use std::sync::{Arc, Mutex};
  
@@ -274,12 +274,19 @@ index d2bc26d..3ce0201 100644
 -            let _ = f.flush();
 -        }
 -    }
+-
+-    /// the file written so far on the storage (fdatasync)
+-    fn sync(&mut self) {
+-        if let Some(f) = self.stream.as_ref() {
+-            let _ = f.sync_data();
+-        }
+-    }
 -}
 -
  /// python 3.15 logging.handlers.RotatingFileHandler (mode 'a', no
  /// namer/rotator)
  pub struct SizeRotatingFile {
-@@ -375,32 +206,6 @@ pub fn clear_bg_logging() {
+@@ -389,32 +213,6 @@ pub fn clear_bg_logging() {
  mod tests {
      use super::*;
  

@@ -23,7 +23,8 @@ STAGE=~/rk/cc1_stage
 cp "$HERE"/dicts/*.dict /ci_build/dict/
 installed=()
 for f in "$ADDONS"/afc_extras/*.py; do cp "$f" $REF/klippy/extras/; installed+=("$REF/klippy/extras/$(basename "$f")"); done
-cp -r "$PLUGINS/AFC_ACE" $REF/klippy/plugins/; installed+=("$REF/klippy/plugins/AFC_ACE")
+# (ACE_SRC: a cosmoace_afc checkout the native ACE follows, instead of the printer's copy)
+cp -r "${ACE_SRC:-$PLUGINS/AFC_ACE}" $REF/klippy/plugins/AFC_ACE; installed+=("$REF/klippy/plugins/AFC_ACE")
 fake=
 trap 'rm -rf "${installed[@]}"; [ -n "$fake" ] && kill $fake' EXIT
 stage() {
@@ -88,5 +89,5 @@ if [ -n "$RS_PY_AFC" ]; then printf '[danger_options]\nuse_python_modules: AFC\n
 KALIRU_KLIPPY_DIR=$REF/klippy \
 KALIRU_LIBPYTHON=${KALIRU_LIBPYTHON:-$HOME/.local/share/uv/python/cpython-3.15-linux-x86_64-gnu/lib/libpython3.15.so.1.0} \
 PYTHONPATH=$HOME/rk/venv315/lib/python3.15/site-packages \
-python3 tools/refrun.py --timeout ${TIMEOUT:-600} --out ~/rk/cc1_rs --klippy "${KALIRU_BIN:-$HOME/rk/target-rusticc/release/kaliru}" $STAGE/cc1.test < /dev/null | tail -1
+python3 tools/refrun.py --timeout ${TIMEOUT:-600} --out ~/rk/cc1_rs --klippy "${KALIRU_BIN:-$HOME/rk/target-rusticc/release/rusticc}" $STAGE/cc1.test < /dev/null | tail -1
 python3 tools/refdiff.py ~/rk/cc1_py ~/rk/cc1_rs

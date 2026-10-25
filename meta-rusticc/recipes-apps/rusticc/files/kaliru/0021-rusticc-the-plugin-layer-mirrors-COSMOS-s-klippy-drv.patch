@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shawn-makes-stuff <shawn.rains@rocketmail.com>
 Date: Sun, 25 Oct 2026 18:16:09 +0200
-Subject: [PATCH 23/23] rusticc: the plugin layer mirrors COSMOS's klippy;
+Subject: [PATCH 21/23] rusticc: the plugin layer mirrors COSMOS's klippy;
  drv8833 for python modules
 
 Mirrors generated from the COSMOS reference (Kalico 5b59427 + COSMOS's
@@ -14,7 +14,7 @@ python modules: the python AFC with an Elegoo Canvas runs on Rusticc.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
 ---
- src/extras/drv8833.rs                         |   2 +-
+ src/extras/drv8833.rs                         |   7 +-
  src/plugins/impls/cosmos.rs                   |  20 ++
  src/plugins/impls/mod.rs                      |   2 +
  src/plugins/mirror.bin                        | Bin 206990 -> 212864 bytes
@@ -27,7 +27,7 @@ Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
  src/plugins/mirror/klippy.queuelogger.py      |  18 +-
  src/plugins/mirror_ids.rs                     | 261 +++++++++++++++++-
  tools/gen_mirror.py                           |  20 +-
- 13 files changed, 820 insertions(+), 22 deletions(-)
+ 13 files changed, 825 insertions(+), 22 deletions(-)
  create mode 100644 src/plugins/impls/cosmos.rs
  create mode 100644 src/plugins/mirror/klippy.extras.canvas_filament_sensor.py
  create mode 100644 src/plugins/mirror/klippy.extras.canvas_rfid.py
@@ -35,7 +35,7 @@ Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
  create mode 100644 src/plugins/mirror/klippy.extras.load_cell.hx711s.py
 
 diff --git a/src/extras/drv8833.rs b/src/extras/drv8833.rs
-index dc8ffea..1ed531a 100644
+index 34e8d1a..d3caf2e 100644
 --- a/src/extras/drv8833.rs
 +++ b/src/extras/drv8833.rs
 @@ -541,7 +541,7 @@ pub struct PrinterDrv8833 {
@@ -47,6 +47,18 @@ index dc8ffea..1ed531a 100644
      hall_controller: Rc<McuDrv8833Controller>,
      active: Cell<bool>,
      manual_mode: Cell<bool>,
+@@ -707,6 +707,11 @@ impl PrinterDrv8833 {
+         )
+     }
+ 
++    /// self.active: a move is running
++    pub fn is_active(&self) -> bool {
++        self.active.get()
++    }
++
+     /// Drv8833Interface.drv8833_set_speed
+     pub fn drv8833_set_speed(&self, speed: f64) -> KResult<()> {
+         if speed == 0.0 {
 diff --git a/src/plugins/impls/cosmos.rs b/src/plugins/impls/cosmos.rs
 new file mode 100644
 index 0000000..15b546d

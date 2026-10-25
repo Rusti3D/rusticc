@@ -49,10 +49,10 @@ index 9ef6a4b..c748a94 100644
 +    });
 +}
 diff --git a/src/printer.rs b/src/printer.rs
-index f81385c..98190b3 100644
+index 4465631..cf30f88 100644
 --- a/src/printer.rs
 +++ b/src/printer.rs
-@@ -840,6 +840,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
+@@ -876,6 +876,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
  pub fn main() {
      crate::util::fix_sigint();
      crate::pcprof::start();
@@ -61,7 +61,7 @@ index f81385c..98190b3 100644
      let (options, args) = parse_args(&argv);
      if options.import_test {
 diff --git a/src/webhooks.rs b/src/webhooks.rs
-index c67ee62..2f0e73a 100644
+index c623163..5a0a458 100644
 --- a/src/webhooks.rs
 +++ b/src/webhooks.rs
 @@ -452,7 +452,8 @@ impl ClientConnection {

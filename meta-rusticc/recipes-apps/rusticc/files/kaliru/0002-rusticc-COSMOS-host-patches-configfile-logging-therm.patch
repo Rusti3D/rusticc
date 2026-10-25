@@ -21,14 +21,14 @@ rollover.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- src/configfile.rs                 |  43 ++++-------
+ src/configfile.rs                 |  43 ++++------
  src/extras/load_cell/load_cell.rs |   5 +-
  src/extras/probe.rs               |   3 +-
- src/extras/resonance_tester.rs    |   9 ++-
+ src/extras/resonance_tester.rs    |   9 +-
  src/extras/shaper_calibrate.rs    |  10 ++-
- src/extras/thermistor.rs          |  80 ++++++++++++++++---
- src/queuelogger.rs                | 124 +++++++++++++++++++++++++++---
- 7 files changed, 218 insertions(+), 56 deletions(-)
+ src/extras/thermistor.rs          |  80 +++++++++++++++---
+ src/queuelogger.rs                | 131 +++++++++++++++++++++++++++---
+ 7 files changed, 225 insertions(+), 56 deletions(-)
 
 diff --git a/src/configfile.rs b/src/configfile.rs
 index e324711..a1fb37c 100644
@@ -353,7 +353,7 @@ index fbb0867..4d0e449 100644
 +    }
 +}
 diff --git a/src/queuelogger.rs b/src/queuelogger.rs
-index 0d21222..d6a0628 100644
+index 3e0727d..c8e55f3 100644
 --- a/src/queuelogger.rs
 +++ b/src/queuelogger.rs
 @@ -1,6 +1,8 @@
@@ -375,7 +375,7 @@ index 0d21222..d6a0628 100644
  use std::sync::mpsc;
  use std::sync::{Arc, Mutex};
  
-@@ -183,17 +185,94 @@ impl RotatingFile {
+@@ -190,17 +192,101 @@ impl RotatingFile {
      }
  }
  
@@ -456,6 +456,13 @@ index 0d21222..d6a0628 100644
 +            let _ = f.flush();
 +        }
 +    }
++
++    /// the file written so far on the storage (fdatasync)
++    fn sync(&mut self) {
++        if let Some(f) = self.stream.as_ref() {
++            let _ = f.sync_data();
++        }
++    }
 +}
 +
  struct Inner {
@@ -474,7 +481,7 @@ index 0d21222..d6a0628 100644
          let mut lines: Vec<String> = self.rollover_info.values().cloned().collect();
          lines.push(format!("=============== Log rollover at {} ===============", crate::util::asctime_local(now() as f64)));
          self.emit(&lines.join("\n"));
-@@ -201,7 +280,7 @@ impl Inner {
+@@ -208,7 +294,7 @@ impl Inner {
  
      /// BaseRotatingHandler.emit
      fn emit(&mut self, msg: &str) {
@@ -483,7 +490,7 @@ index 0d21222..d6a0628 100644
              self.do_rollover();
          }
          self.file.write_line(msg);
-@@ -216,9 +295,10 @@ pub struct QueueListener {
+@@ -224,9 +310,10 @@ pub struct QueueListener {
  }
  
  impl QueueListener {
@@ -494,10 +501,10 @@ index 0d21222..d6a0628 100644
 +    pub fn new(filename: &str, _rotate_log_at_restart: bool) -> std::io::Result<Self> {
 +        let file = SizeRotatingFile::new(filename, 5 * 1024 * 1024, 2)?;
 +        let inner = Arc::new(Mutex::new(Inner { file, rollover_info: BTreeMap::new() }));
-         let (tx, rx) = mpsc::channel::<Option<String>>();
+         let (tx, rx) = mpsc::channel::<Option<(String, bool)>>();
          let i = inner.clone();
          let thread = std::thread::spawn(move || {
-@@ -307,4 +387,28 @@ mod tests {
+@@ -325,4 +412,28 @@ mod tests {
          assert!(names.contains(&"klippy.log.notadate".to_string()));
          let _ = std::fs::remove_dir_all(&dir);
      }

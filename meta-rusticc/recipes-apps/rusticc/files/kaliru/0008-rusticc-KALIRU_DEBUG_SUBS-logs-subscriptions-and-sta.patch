@@ -10,10 +10,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 20 insertions(+)
 
 diff --git a/src/webhooks.rs b/src/webhooks.rs
-index 88f05f0..44382cc 100644
+index 79cb3f6..e52a65f 100644
 --- a/src/webhooks.rs
 +++ b/src/webhooks.rs
-@@ -965,6 +965,26 @@ impl QueryStatusHelper {
+@@ -971,6 +971,26 @@ impl QueryStatusHelper {
          for (_, (cconn, sub, template)) in self.clients.borrow().iter() {
              msglist.push((Some(cconn.clone()), sub.clone(), SendFunc::Conn(cconn.clone()), template.clone()));
          }

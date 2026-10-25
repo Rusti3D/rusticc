@@ -20,7 +20,7 @@ SRC_URI += " \
     file://kaliru/0018-rusticc-errors-reach-the-flash-at-once-log-fdatasync.patch \
     file://kaliru/0019-rusticc-drop-the-timed-log-rotation-COSMOS-replaced-.patch \
     file://kaliru/0020-rusticc-clippy-in-the-profiler-and-git-status-helper.patch \
-    file://kaliru/0021-rusticc-native-AFC-for-COSMOS-s-stock-Canvas.patch \
-    file://kaliru/0022-rusticc-native-AFC-for-cosmoace_afc-the-ACE-Pro-ACE-.patch \
-    file://kaliru/0023-rusticc-the-plugin-layer-mirrors-COSMOS-s-klippy-drv.patch \
+    file://kaliru/0021-rusticc-the-plugin-layer-mirrors-COSMOS-s-klippy-drv.patch \
+    file://kaliru/0022-rusticc-drv8833-answers-AFC-s-method-calls-drv8833_m.patch \
+    file://kaliru/0023-rusticc-the-Rusticc-binary-kaliru-with-Rust-AFC-buil.patch \
 "

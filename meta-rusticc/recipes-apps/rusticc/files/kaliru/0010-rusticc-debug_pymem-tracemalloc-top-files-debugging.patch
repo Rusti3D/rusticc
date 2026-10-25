@@ -9,10 +9,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 16 insertions(+)
 
 diff --git a/src/webhooks.rs b/src/webhooks.rs
-index 7ba4e39..d12dced 100644
+index 15c40e6..5b069b4 100644
 --- a/src/webhooks.rs
 +++ b/src/webhooks.rs
-@@ -989,6 +989,22 @@ impl QueryStatusHelper {
+@@ -995,6 +995,22 @@ impl QueryStatusHelper {
                      if let Ok(f) = crate::plugins::py::lookup("sys", "_debugmallocstats") {
                          let _ = f.call(&[]);
                      }
