@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Make Rusticc's branding assets from branding/Rusticc.png, in the formats and
-# sizes of the COSMOS files they replace (meta-opencentauri), into
-# meta-rusticc:
-#   boot logo   recipes-data/opencentauri-bootlogos  480x272 / 532x300 24-bit BMP
+# Make Rusticc's branding assets from branding/Rusticc.png (and the boot logo
+# from branding/Rusti3D.png), in the formats and sizes of the COSMOS files they
+# replace (meta-opencentauri), into meta-rusticc:
+#   boot logo   recipes-data/opencentauri-bootlogos  480x272 / 532x300 24-bit BMP (Rusti3D)
 #   psplash     recipes-core/psplash                 480x272 PNG
 #   fluidd      recipes-apps/fluidd                  logo SVG, 64x64 icon, 641x72 wordmark
 #   python3 branding/make_assets.py
@@ -14,6 +14,8 @@ from PIL import Image
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE / "Rusticc.png"
+# the first logo on screen (u-boot), before the Rusticc splash
+BOOT_SRC = HERE / "Rusti3D.png"
 OUT = HERE.parent / "meta-rusticc"
 
 # Rusticc.png's parts (measured: rows / columns with white pixels)
@@ -56,10 +58,14 @@ def save(im, fmt, **kw):
 def main():
     logo = Image.open(SRC).convert("RGB")
 
-    # Boot logos (u-boot's bootlogo.bmp: 24-bit, bottom-up, the panel's size)
+    # Boot logos (u-boot's bootlogo.bmp: 24-bit, bottom-up, the panel's size):
+    # Rusti3D, its transparency on black
+    rusti3d = Image.open(BOOT_SRC).convert("RGBA")
+    boot_logo = Image.new("RGB", rusti3d.size, (0, 0, 0))
+    boot_logo.paste(rusti3d, mask=rusti3d.getchannel("A"))
     boot = "recipes-data/opencentauri-bootlogos/files"
-    write(f"{boot}/centauri-carbon-1/bootlogo.bmp", save(fit(logo, (480, 272)), "BMP"))
-    write(f"{boot}/centauri-carbon-2/bootlogo.bmp", save(fit(logo, (532, 300)), "BMP"))
+    write(f"{boot}/centauri-carbon-1/bootlogo.bmp", save(fit(boot_logo, (480, 272)), "BMP"))
+    write(f"{boot}/centauri-carbon-2/bootlogo.bmp", save(fit(boot_logo, (532, 300)), "BMP"))
 
     # The psplash boot splash
     write("recipes-core/psplash/files/rusticc_1.png", save(fit(logo, (480, 272)).convert("RGBA"), "PNG"))
