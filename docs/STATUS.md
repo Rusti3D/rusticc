@@ -18,7 +18,10 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
     0023 mirrors COSMOS's modules (drv8833): the python AFC with a Canvas runs on Rusticc, 9/9 identical.
   - User (2026-10-25): other MMUs use the regular (python) AFC distro for now; the full native AFC port
     comes once Rusticc checks out on the printer.
-- [ ] Release 0.0.1: the new .swu (rusticc binary, Moonruster 724e081 + patches) on GitHub (user's request).
+- [x] Release 0.0.1 (2026-10-25): github.com/Rusti3D/rusticc/releases/tag/0.0.1, installed on the user's CC1
+  (slot B; slot A kept as stock COSMOS 20b31d0226). Image: rusticc e04cb3e8, Moonruster 02ae9c27.
+- [ ] 0.0.2 built locally, NOT released (user: "It can go in the next iteration"): Moonruster's logs name it
+  (rusticc 9d83ae1, Moonruster patch 0004; Moonruster e0589681), image d12147cc. Release with the next batch.
 - [ ] Later (user, 2026-10-25): Rusticc's own installer, "not just reuse cosmos. We cant assume everyone is
   coming from cosmos, this will branch eventually." Today the .swu is a repack of a COSMOS slot, signed with
   COSMOS's swupdate key and installed with COSMOS's `flash`: it needs a COSMOS printer. To plan: install paths
