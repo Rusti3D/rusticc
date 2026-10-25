@@ -4,3 +4,5 @@
 *.webp binary
 *.bin binary
 *.elf binary
+# patches are applied byte for byte (some patched files have CRLF lines)
+meta-rusticc/recipes-apps/*/files/*/*.patch -text
