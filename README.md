@@ -18,9 +18,12 @@ the next reboot. Everything you configured stays: `printer.cfg`, `cosmos.conf`, 
 macros and the COSMOS slicer profiles all work unchanged, because Rusticc keeps COSMOS's configuration, file
 layout and macro names.
 
+Rusticc runs on real Centauri Carbons: download the latest image, `cosmos-centauri-carbon-1.swu`, from the
+[releases](https://github.com/Rusti3D/rusticc/releases). Early days: please report issues on this repository.
+
 - **Install** from a COSMOS printer's shell: copy the image over and run COSMOS's installer, then reboot:
   ```sh
-  flash /user-resource/rusticc-cc1.swu   # writes the other slot; "Update finished, run 'reboot'"
+  flash /user-resource/cosmos-centauri-carbon-1.swu   # writes the other slot; "Update finished, run 'reboot'"
   reboot
   ```
   At the first boot the bed and toolhead boards are flashed with Rusticc's MCU firmware (the same check COSMOS
@@ -28,8 +31,9 @@ layout and macro names.
 - **Check what runs:** the login banner and `/etc/os-release` say Rusticc; `klippy.log` starts with
   `App Name: Rusticc`; Mainsail shows the Rusticc version (Rusticc ships Mainsail and GrumpyScreen only:
   no Fluidd, AtomScreen or Doom).
-- **Updates:** the web UI's update manager and `check-update` look at github.com/Rusti3D/rusticc releases
-  (`check_for_updates` in `cosmos.conf` turns this off).
+- **Updates:** Mainsail's update panel (the `rusticc` entry) and `check-update` offer new releases from
+  github.com/Rusti3D/rusticc, installed the same A/B way. In `cosmos.conf`, `check_for_updates = True` turns
+  them on and `release = stable` follows the releases.
 - **Going back to COSMOS:** install a COSMOS `.swu` the same way (`flash cosmos-centauri-carbon-1.swu`); its first
   boot flashes COSMOS's MCU firmware back. The previous slot can also be booted directly:
   `fw_setenv mmc_root /dev/mmcblk0p5; fw_setenv boot_part 4; fw_setenv systemAB_next A; reboot` (slot A; for slot B
