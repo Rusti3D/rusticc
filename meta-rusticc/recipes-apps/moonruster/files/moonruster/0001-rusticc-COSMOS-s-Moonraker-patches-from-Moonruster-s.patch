@@ -232,7 +232,7 @@ index 50e9f1c..29ef7d6 100644
          app.add_handler(&format!("{}/server/jsonrpc", route_prefix), HandlerKind::Rpc);
          srv.register_component("jsonrpc", json_rpc).map_err(crate::confighelper::ConfigError::from)?;
 diff --git a/src/components/machine/mod.rs b/src/components/machine/mod.rs
-index 6ce7cee..09ea8ee 100644
+index de22ca2..a9855d8 100644
 --- a/src/components/machine/mod.rs
 +++ b/src/components/machine/mod.rs
 @@ -30,6 +30,13 @@ const SYSTEMD_MGR: &str = "org.freedesktop.systemd1.Manager";
@@ -249,7 +249,7 @@ index 6ce7cee..09ea8ee 100644
  
  pub type SudoCallback = Rc<dyn Fn() -> LocalBoxFuture<'static, Result<(String, bool), ServerError>>>;
  
-@@ -139,6 +146,8 @@ impl Machine {
+@@ -142,6 +149,8 @@ impl Machine {
              "systemd_cli" => ProviderKind::SystemdCli,
              "systemd_dbus" => ProviderKind::SystemdDbus,
              "supervisord_cli" => ProviderKind::SupervisordCli,
@@ -258,7 +258,7 @@ index 6ce7cee..09ea8ee 100644
              other => return Err(ConfigHelper::error(format!("Invalid Provider: {}", other))),
          };
          let shutdown_action = config.getchoice("shutdown_action", &["halt", "poweroff"], Some("poweroff"), true)?;
-@@ -149,6 +158,8 @@ impl Machine {
+@@ -152,6 +161,8 @@ impl Machine {
              shutdown_action,
              available_services: RefCell::new(IndexMap::new()),
              svc_cmd: RefCell::new(None),
@@ -267,7 +267,7 @@ index 6ce7cee..09ea8ee 100644
              spv_conf,
              dbus_ready: Cell::new(false),
              login_mgr: Cell::new(false),
-@@ -325,8 +336,6 @@ impl Machine {
+@@ -349,8 +360,6 @@ impl Machine {
          self.provider.extract_service_info(name, pid, None, false).await
      }
  

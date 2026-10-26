@@ -166,10 +166,10 @@ index 9f909ce..281dc27 100644
              );
          }
 diff --git a/src/components/machine/mod.rs b/src/components/machine/mod.rs
-index 09ea8ee..9a5e23b 100644
+index a9855d8..1a4c07d 100644
 --- a/src/components/machine/mod.rs
 +++ b/src/components/machine/mod.rs
-@@ -445,7 +445,7 @@ impl Machine {
+@@ -469,7 +469,7 @@ impl Machine {
              }
              if restart {
                  self.restart_moonraker_service();
