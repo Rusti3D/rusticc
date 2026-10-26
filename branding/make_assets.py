@@ -87,8 +87,10 @@ def main():
     splash.paste(dim, band[:2])
     psplash = "recipes-core/psplash/files"
     write(f"{psplash}/rusticc_1.png", save(splash.convert("RGBA"), "PNG"))
-    write(f"{psplash}/rusticc_1_stripes.png", save(lit, "PNG"))
-    write(f"{psplash}/rusticc_1_stripes_dim.png", save(dim, "PNG"))
+    # (RGBA: psplash's image drawer counts a row's padding as pixels, and an
+    # RGB row is padded to 4 bytes)
+    write(f"{psplash}/rusticc_1_stripes.png", save(lit.convert("RGBA"), "PNG"))
+    write(f"{psplash}/rusticc_1_stripes_dim.png", save(dim.convert("RGBA"), "PNG"))
     write(f"{psplash}/psplash-rusticc-stripes.h", (
         "/* Made by branding/make_assets.py: where the stripe band\n"
         " * (rusticc_1_stripes.png, rusticc_1_stripes_dim.png) is in the splash */\n"
