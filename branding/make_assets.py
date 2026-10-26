@@ -3,12 +3,15 @@
 # from branding/Rusti3D.png), in the formats and sizes of the COSMOS files they
 # replace (meta-opencentauri), into meta-rusticc:
 #   boot logo   recipes-data/opencentauri-bootlogos  480x272 / 532x300 24-bit BMP (Rusti3D)
-#   psplash     recipes-core/psplash                 480x272 PNG
+#   psplash     recipes-core/psplash                 480x272 PNG, its stripes dimmed; the stripe band
+#                                                    dimmed and lit (psplash fills it with the boot
+#                                                    progress) and its position (a C header)
 #   fluidd      recipes-apps/fluidd                  logo SVG, 64x64 icon, 641x72 wordmark
 #   mainsail    recipes-apps/mainsail                sidebar logo SVG, 16/32/180 px icons
 #   python3 branding/make_assets.py
 import base64
 import io
+import math
 from pathlib import Path
 
 from PIL import Image
@@ -24,6 +27,8 @@ LETTERS = (147, 265, 1522, 550)  # "RUSTICC"
 BLOCK = (147, 265, 1522, 685)  # the letters and the stripes under them
 LETTER_R = (147, 265, 362, 550)
 STRIPES = (147, 573, 1522, 685)
+# the boot splash's unlit stripes: this share of their brightness
+SPLASH_DIM = 0.3
 
 
 def fit(im, size, bg=(0, 0, 0)):
@@ -68,8 +73,27 @@ def main():
     write(f"{boot}/centauri-carbon-1/bootlogo.bmp", save(fit(boot_logo, (480, 272)), "BMP"))
     write(f"{boot}/centauri-carbon-2/bootlogo.bmp", save(fit(boot_logo, (532, 300)), "BMP"))
 
-    # The psplash boot splash
-    write("recipes-core/psplash/files/rusticc_1.png", save(fit(logo, (480, 272)).convert("RGBA"), "PNG"))
+    # The psplash boot splash: the logo with its stripes dimmed, and the stripe
+    # band dimmed and lit for psplash to fill with the boot progress
+    size = (480, 272)
+    splash = fit(logo, size)
+    scale = min(size[0] / logo.width, size[1] / logo.height)
+    ox = (size[0] - round(logo.width * scale)) // 2
+    oy = (size[1] - round(logo.height * scale)) // 2
+    band = (ox + math.floor(STRIPES[0] * scale), oy + math.floor(STRIPES[1] * scale),
+            ox + math.ceil(STRIPES[2] * scale), oy + math.ceil(STRIPES[3] * scale))
+    lit = splash.crop(band)
+    dim = lit.point(lambda v: round(v * SPLASH_DIM))
+    splash.paste(dim, band[:2])
+    psplash = "recipes-core/psplash/files"
+    write(f"{psplash}/rusticc_1.png", save(splash.convert("RGBA"), "PNG"))
+    write(f"{psplash}/rusticc_1_stripes.png", save(lit, "PNG"))
+    write(f"{psplash}/rusticc_1_stripes_dim.png", save(dim, "PNG"))
+    write(f"{psplash}/psplash-rusticc-stripes.h", (
+        "/* Made by branding/make_assets.py: where the stripe band\n"
+        " * (rusticc_1_stripes.png, rusticc_1_stripes_dim.png) is in the splash */\n"
+        f"#define RUSTICC_STRIPES_X {band[0]}\n"
+        f"#define RUSTICC_STRIPES_Y {band[1]}\n").encode())
 
     # Fluidd: the theme logo (an SVG around the PNG of the logo block),
     # the icon (the R over a strip of the stripes) and the wordmark

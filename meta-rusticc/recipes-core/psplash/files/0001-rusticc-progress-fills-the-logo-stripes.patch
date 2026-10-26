@@ -1,0 +1,102 @@
+From: Rusticc
+Subject: [PATCH] Rusticc: the boot progress fills the logo stripes, no bar
+
+The progress is drawn by lighting the stripe band under the RUSTICC logo
+from the left (rusticc_1_stripes.png over rusticc_1_stripes_dim.png at
+RUSTICC_STRIPES_X/Y, branding/make_assets.py) instead of a bar under it.
+
+---
+diff --git a/psplash.c b/psplash.c
+index 261dd1c..027d036 100644
+--- a/psplash.c
++++ b/psplash.c
+@@ -14,7 +14,9 @@
+ #include "psplash-config.h"
+ #include "psplash-colors.h"
+ #include "psplash-poky-img.h"
+-#include "psplash-bar-img.h"
++#include "psplash-stripes-img.h"
++#include "psplash-stripes-dim-img.h"
++#include "psplash-rusticc-stripes.h"
+ #ifdef HAVE_SYSTEMD
+ #include <systemd/sd-daemon.h>
+ #endif
+@@ -65,36 +67,30 @@ psplash_draw_msg (PSplashFB *fb, const char *msg)
+ void
+ psplash_draw_progress (PSplashFB *fb, int value)
+ {
+-  int x, y, width, height, barwidth;
+-
+-  /* 4 pix border */
+-  x      = ((fb->width  - BAR_IMG_WIDTH)/2) + 4 ;
+-  y      = SPLIT_LINE_POS(fb) + 4;
+-  width  = BAR_IMG_WIDTH - 8; 
+-  height = BAR_IMG_HEIGHT - 8;
+-
+-  if (value > 0)
+-    {
+-      barwidth = (CLAMP(value,0,100) * width) / 100;
+-      psplash_fb_draw_rect (fb, x + barwidth, y, 
+-    			width - barwidth, height,
+-			PSPLASH_BAR_BACKGROUND_COLOR);
+-      psplash_fb_draw_rect (fb, x, y, barwidth,
+-			    height, PSPLASH_BAR_COLOR);
+-    }
+-  else
+-    {
+-      barwidth = (CLAMP(-value,0,100) * width) / 100;
+-      psplash_fb_draw_rect (fb, x, y, 
+-    			width - barwidth, height,
+-			PSPLASH_BAR_BACKGROUND_COLOR);
+-      psplash_fb_draw_rect (fb, x + width - barwidth,
+-			    y, barwidth, height,
+-			    PSPLASH_BAR_COLOR);
+-    }
+-
+-  DBG("value: %i, width: %i, barwidth :%i\n", value, 
+-		width, barwidth);
++  int x, y, litwidth;
++
++  /* Rusticc: the progress lights the logo's stripes from the left (the
++   * stripe band, dimmed, then lit up to the progress: psplash_fb_draw_image
++   * plots no pixel past the width it is given) */
++  x = (fb->width  - POKY_IMG_WIDTH)/2 + RUSTICC_STRIPES_X;
++  y = (fb->height - POKY_IMG_HEIGHT)/2 + RUSTICC_STRIPES_Y;
++  litwidth = (CLAMP(value < 0 ? -value : value, 0, 100) * STRIPES_IMG_WIDTH) / 100;
++
++  psplash_fb_draw_image (fb, x, y,
++			 STRIPES_DIM_IMG_WIDTH,
++			 STRIPES_DIM_IMG_HEIGHT,
++			 STRIPES_DIM_IMG_BYTES_PER_PIXEL,
++			 STRIPES_DIM_IMG_ROWSTRIDE,
++			 STRIPES_DIM_IMG_RLE_PIXEL_DATA);
++  if (litwidth > 0)
++    psplash_fb_draw_image (fb, x, y,
++			   litwidth,
++			   STRIPES_IMG_HEIGHT,
++			   STRIPES_IMG_BYTES_PER_PIXEL,
++			   STRIPES_IMG_ROWSTRIDE,
++			   STRIPES_IMG_RLE_PIXEL_DATA);
++
++  DBG("value: %i, litwidth: %i\n", value, litwidth);
+ }
+ #endif /* PSPLASH_SHOW_PROGRESS_BAR */
+ 
+@@ -318,16 +314,7 @@ main (int argc, char** argv)
+ 			 POKY_IMG_RLE_PIXEL_DATA);
+ 
+ #ifdef PSPLASH_SHOW_PROGRESS_BAR
+-  /* Draw progress bar border */
+-  psplash_fb_draw_image (fb, 
+-			 (fb->width  - BAR_IMG_WIDTH)/2, 
+-			 SPLIT_LINE_POS(fb),
+-			 BAR_IMG_WIDTH,
+-			 BAR_IMG_HEIGHT,
+-			 BAR_IMG_BYTES_PER_PIXEL,
+-			 BAR_IMG_ROWSTRIDE,
+-			 BAR_IMG_RLE_PIXEL_DATA);
+-
++  /* Rusticc: no bar; the progress is the logo's stripes */
+   psplash_draw_progress (fb, 0);
+ #endif
+ 
