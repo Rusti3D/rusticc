@@ -17,5 +17,5 @@ fi
 cd "$DEST"
 git fetch -q origin
 git checkout -q -B rusticc-work "$rev"
-git am -q "$R"/files/kaliru/*.patch
+git am -q --keep-cr "$R"/files/kaliru/*.patch
 echo "$DEST: $(git log --oneline "$rev"..HEAD | wc -l) Rusticc patches on $(git log -1 --format=%h "$rev")"

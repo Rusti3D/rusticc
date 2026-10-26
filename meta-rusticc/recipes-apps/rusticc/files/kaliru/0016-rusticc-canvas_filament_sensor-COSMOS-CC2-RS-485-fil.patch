@@ -21,7 +21,7 @@ Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
  create mode 100644 src/extras/canvas_filament_sensor.rs
 
 diff --git a/src/extras/buttons.rs b/src/extras/buttons.rs
-index e8cdc6a..e2df1ec 100644
+index 277ce8b..567a644 100644
 --- a/src/extras/buttons.rs
 +++ b/src/extras/buttons.rs
 @@ -7,7 +7,8 @@ use crate::configfile::{ConfigWrapper, Lim};
@@ -132,7 +132,7 @@ index e8cdc6a..e2df1ec 100644
          Ok(())
      }
  
-@@ -141,7 +188,7 @@ impl McuButtons {
+@@ -154,7 +201,7 @@ impl McuButtons {
          let new_buttons = buttons[start..].to_vec();
          // Send ack to MCU
          if let Some(cmd) = self.ack_cmd.borrow().as_ref() {
@@ -141,7 +141,7 @@ index e8cdc6a..e2df1ec 100644
          }
          self.ack_count.set(self.ack_count.get() + new_count);
          // Invoke callbacks with this event in main thread
-@@ -487,9 +534,10 @@ impl PrinterButtons {
+@@ -513,9 +560,10 @@ impl PrinterButtons {
              pin_params_list.push((p.pin.clone(), p.invert, p.pullup));
          }
          let mcu_name = mcu_name.unwrap_or_default();
@@ -153,7 +153,7 @@ index e8cdc6a..e2df1ec 100644
              let build_config: Rc<dyn Fn() -> KResult<()>> =
                  Rc::new(|| Err(KError::Other("kaliru: button config on a python plugin's chip is not mirrored".into())));
              if let Some(res) = chip.register_config_callback(build_config) {
-@@ -501,7 +549,11 @@ impl PrinterButtons {
+@@ -527,7 +575,11 @@ impl PrinterButtons {
          let mcu_buttons = match existing {
              Some(b) if b.pin_list.borrow().len() + pin_params_list.len() <= 8 => b,
              _ => {
@@ -164,8 +164,8 @@ index e8cdc6a..e2df1ec 100644
 +                    None => get_printer_mcu(&self.printer, &mcu_name)?,
 +                };
                  let b = McuButtons::new(&self.printer, &mcu);
+                 self.groups.borrow_mut().push((mcu_name.clone(), b.clone()));
                  self.mcu_buttons.borrow_mut().insert(mcu_name, b.clone());
-                 b
 diff --git a/src/extras/canvas_filament_sensor.rs b/src/extras/canvas_filament_sensor.rs
 new file mode 100644
 index 0000000..2208aef
@@ -727,7 +727,7 @@ index 4a2aa55..e04429b 100644
      PrinterModule { name: "controller_fan", ported: true, load_config: None, load_config_prefix: Some(controller_fan::load_config_prefix), register_components: None },
      PrinterModule { name: "dac084S085", ported: true, load_config: None, load_config_prefix: Some(dac084s085::load_config_prefix), register_components: None },
 diff --git a/src/pins.rs b/src/pins.rs
-index be75ed1..8af0061 100644
+index 41331a6..025b364 100644
 --- a/src/pins.rs
 +++ b/src/pins.rs
 @@ -45,6 +45,11 @@ pub trait PinChip {
@@ -743,10 +743,10 @@ index be75ed1..8af0061 100644
  
  /// The pin_params dict. Shared: lookup_pin() hands the same object to every
 diff --git a/src/serialhdl.rs b/src/serialhdl.rs
-index 186277d..dccf949 100644
+index c892096..71c389c 100644
 --- a/src/serialhdl.rs
 +++ b/src/serialhdl.rs
-@@ -782,6 +782,11 @@ fn custom_baud_error(baud: u32) -> KError {
+@@ -807,6 +807,11 @@ fn custom_baud_error(baud: u32) -> KError {
  }
  
  impl Uart {

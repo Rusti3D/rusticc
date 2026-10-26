@@ -10,10 +10,10 @@ LIC_FILES_CHKSUM = "file://COPYING;md5=1ebbd3e34237af26da5dc08a4e440464"
 SRC_URI = "git://github.com/Rusti3D/kaliru.git;protocol=https;branch=main \
            git://github.com/Rusti3D/Rust-AFC.git;protocol=https;branch=main;name=rust-afc;destsuffix=rust-afc \
 "
-SRCREV = "d0f37ad3c1592d798e327fa2b3fcea2cd580b148"
+SRCREV = "c1e1fb050216a864a0fab4d4711087d8c00031b6"
 # Rust-AFC, the native AFC plugin the rusticc crate builds in (the rev its
 # Cargo.toml names); cargo_common points the git dependency at this checkout
-SRCREV_rust-afc = "3ea26b12f6d00b237d18aa1681735d227dd454ad"
+SRCREV_rust-afc = "e85ca0b69ddafc02a43dede2e1a9980bde8f71c7"
 SRCREV_FORMAT = "default_rust-afc"
 # git am: patch 0023 carries a binary file (the plugin mirror bundle)
 PATCHTOOL = "git"

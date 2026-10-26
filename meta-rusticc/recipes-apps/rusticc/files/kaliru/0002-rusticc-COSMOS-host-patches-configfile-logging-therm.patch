@@ -31,7 +31,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  7 files changed, 225 insertions(+), 56 deletions(-)
 
 diff --git a/src/configfile.rs b/src/configfile.rs
-index e324711..a1fb37c 100644
+index f607ef3..ae8041a 100644
 --- a/src/configfile.rs
 +++ b/src/configfile.rs
 @@ -870,8 +870,19 @@ impl PrinterConfig {
