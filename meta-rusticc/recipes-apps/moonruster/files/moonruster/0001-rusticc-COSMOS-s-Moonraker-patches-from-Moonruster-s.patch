@@ -13,7 +13,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/components/application/handlers.rs      |  79 +++-
  src/components/application/mod.rs           |  31 +-
- src/components/machine/mod.rs               |  13 +-
+ src/components/machine/mod.rs               |  16 +
  src/components/machine/providers.rs         | 148 +++++-
  src/components/update_manager/common.rs     |  11 +-
  src/components/update_manager/mod.rs        |   2 +
@@ -21,7 +21,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  src/components/webcam.rs                    |  39 +-
  src/loghelper.rs                            |  45 +-
  src/utils.rs                                |  42 ++
- 10 files changed, 864 insertions(+), 19 deletions(-)
+ 10 files changed, 869 insertions(+), 17 deletions(-)
  create mode 100644 src/components/update_manager/swu_deploy.rs
 
 diff --git a/src/components/application/handlers.rs b/src/components/application/handlers.rs
@@ -164,7 +164,7 @@ index c4f4004..57d61a3 100644
          if let Some(ims) = req.header("If-Modified-Since") {
              if let Ok(since) = httpdate::parse_http_date(&ims) {
 diff --git a/src/components/application/mod.rs b/src/components/application/mod.rs
-index 50e9f1c..29ef7d6 100644
+index ec23134..b5554b0 100644
 --- a/src/components/application/mod.rs
 +++ b/src/components/application/mod.rs
 @@ -59,6 +59,9 @@ pub enum HandlerKind {
@@ -177,7 +177,7 @@ index 50e9f1c..29ef7d6 100644
  }
  
  struct Rule {
-@@ -117,6 +120,7 @@ pub struct MoonrakerApp {
+@@ -133,6 +136,7 @@ pub struct MoonrakerApp {
      cert_path: PathBuf,
      key_path: PathBuf,
      route_prefix: String,
@@ -185,7 +185,7 @@ index 50e9f1c..29ef7d6 100644
      template_cache: RefCell<HashMap<String, Rc<crate::components::template::JinjaTemplate>>>,
      listeners: crate::server::TaskSet,
      pub verbose: bool,
-@@ -149,6 +153,24 @@ impl MoonrakerApp {
+@@ -165,6 +169,24 @@ impl MoonrakerApp {
              home_pattern = format!("{}/?", route_prefix);
          }
          let max_ws_conns = config.getint_or("max_websocket_connections", MAX_WS_CONNS_DEFAULT)?;
@@ -210,7 +210,7 @@ index 50e9f1c..29ef7d6 100644
          let app = Rc::new(MoonrakerApp {
              json_rpc: json_rpc.clone(),
              api_cache: RefCell::new(HashMap::new()),
-@@ -160,12 +182,19 @@ impl MoonrakerApp {
+@@ -176,12 +198,19 @@ impl MoonrakerApp {
              cert_path,
              key_path,
              route_prefix: route_prefix.clone(),
@@ -232,7 +232,7 @@ index 50e9f1c..29ef7d6 100644
          app.add_handler(&format!("{}/server/jsonrpc", route_prefix), HandlerKind::Rpc);
          srv.register_component("jsonrpc", json_rpc).map_err(crate::confighelper::ConfigError::from)?;
 diff --git a/src/components/machine/mod.rs b/src/components/machine/mod.rs
-index de22ca2..a9855d8 100644
+index abababf..f056eae 100644
 --- a/src/components/machine/mod.rs
 +++ b/src/components/machine/mod.rs
 @@ -30,6 +30,13 @@ const SYSTEMD_MGR: &str = "org.freedesktop.systemd1.Manager";
@@ -267,15 +267,18 @@ index de22ca2..a9855d8 100644
              spv_conf,
              dbus_ready: Cell::new(false),
              login_mgr: Cell::new(false),
-@@ -349,8 +360,6 @@ impl Machine {
+@@ -349,6 +360,11 @@ impl Machine {
          self.provider.extract_service_info(name, pid, None, false).await
      }
  
--    // Moonraker's Machine.get_system_provider (Python components, docs/PLUGINS.md)
--    #[allow(dead_code)]
-     pub fn get_system_provider(&self) -> Rc<Provider> {
-         self.provider.clone()
-     }
++    // used by the COSMOS patches (swu_deploy)
++    pub fn get_system_provider(&self) -> Rc<Provider> {
++        self.provider.clone()
++    }
++
+     async fn handle_machine_request(self: Rc<Self>, req: WebRequest) -> ApiResult {
+         let ep = req.get_endpoint().to_string();
+         if self.inside_container.get() {
 diff --git a/src/components/machine/providers.rs b/src/components/machine/providers.rs
 index f24fe50..19bf124 100644
 --- a/src/components/machine/providers.rs

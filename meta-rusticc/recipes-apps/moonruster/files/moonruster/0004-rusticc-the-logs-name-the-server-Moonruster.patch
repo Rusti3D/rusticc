@@ -70,10 +70,10 @@ index 57d61a3..6f894ec 100644
          let announcements = match srv.get::<crate::components::announcements::Announcements>() {
              Some(a) => a.get_announcements(false).await,
 diff --git a/src/components/application/mod.rs b/src/components/application/mod.rs
-index 29ef7d6..2c42350 100644
+index b5554b0..1dcaf44 100644
 --- a/src/components/application/mod.rs
 +++ b/src/components/application/mod.rs
-@@ -314,7 +314,7 @@ impl MoonrakerApp {
+@@ -342,7 +342,7 @@ impl MoonrakerApp {
          let host = if host.to_lowercase() == "all" { "" } else { host };
          if let Err(e) = self.create_http_server(port, host, None).await {
              server().add_warning(
@@ -82,7 +82,7 @@ index 29ef7d6..2c42350 100644
                  None,
                  true,
              );
-@@ -336,7 +336,7 @@ impl MoonrakerApp {
+@@ -364,7 +364,7 @@ impl MoonrakerApp {
                  Ok(acceptor) => {
                      if let Err(e) = self.create_http_server(ssl_port, host, Some(acceptor)).await {
                          server().add_warning(
@@ -91,7 +91,7 @@ index 29ef7d6..2c42350 100644
                              None,
                              true,
                          );
-@@ -344,7 +344,7 @@ impl MoonrakerApp {
+@@ -372,7 +372,7 @@ impl MoonrakerApp {
                  }
                  Err(e) => {
                      server().add_warning(
@@ -153,10 +153,10 @@ index 20f9018..b3bec62 100644
                      true,
                  );
 diff --git a/src/components/klippy_connection.rs b/src/components/klippy_connection.rs
-index 9f909ce..281dc27 100644
+index 74fd6f1..bb07680 100644
 --- a/src/components/klippy_connection.rs
 +++ b/src/components/klippy_connection.rs
-@@ -728,7 +728,7 @@ impl KlippyConnection {
+@@ -730,7 +730,7 @@ impl KlippyConnection {
          if !missing.is_empty() {
              let err_str: Vec<String> = missing.iter().map(|o| format!("[{}]", o)).collect();
              log::info!(
@@ -166,10 +166,10 @@ index 9f909ce..281dc27 100644
              );
          }
 diff --git a/src/components/machine/mod.rs b/src/components/machine/mod.rs
-index a9855d8..1a4c07d 100644
+index f056eae..eb79430 100644
 --- a/src/components/machine/mod.rs
 +++ b/src/components/machine/mod.rs
-@@ -469,7 +469,7 @@ impl Machine {
+@@ -470,7 +470,7 @@ impl Machine {
              }
              if restart {
                  self.restart_moonraker_service();

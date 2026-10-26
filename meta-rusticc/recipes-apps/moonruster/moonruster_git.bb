@@ -8,7 +8,7 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=db95b6e40dc7d26d8308b6b7375637b6"
 # patches, as COSMOS builds Moonraker with its own: files/moonruster, listed
 # by moonruster-patches.inc (tools/moonruster-tree.sh / moonruster-export.sh)
 SRC_URI = "git://github.com/Rusti3D/moonruster.git;protocol=https;branch=main"
-SRCREV = "2d24921a157bfc7325b2d0157fb7aa7caaff6e2e"
+SRCREV = "4475ddd92cb72b28d03c07398deb72f6c10f366f"
 PV = "0.1.0+git"
 
 require moonruster-patches.inc

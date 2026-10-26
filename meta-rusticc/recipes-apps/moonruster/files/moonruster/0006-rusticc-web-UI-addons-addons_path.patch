@@ -98,7 +98,7 @@ index 6f894ec..2182374 100644
          if req.method != "GET" {
              return error_response(&HttpError::new(405), None);
 diff --git a/src/components/application/mod.rs b/src/components/application/mod.rs
-index 2c42350..c09252c 100644
+index 1dcaf44..f9faa57 100644
 --- a/src/components/application/mod.rs
 +++ b/src/components/application/mod.rs
 @@ -62,6 +62,9 @@ pub enum HandlerKind {
@@ -111,7 +111,7 @@ index 2c42350..c09252c 100644
  }
  
  struct Rule {
-@@ -171,6 +174,13 @@ impl MoonrakerApp {
+@@ -187,6 +190,13 @@ impl MoonrakerApp {
              }
          }
          let webcam_redirect = if cosmos { config.get_opt("webcam_redirect")? } else { None };
@@ -125,7 +125,7 @@ index 2c42350..c09252c 100644
          let app = Rc::new(MoonrakerApp {
              json_rpc: json_rpc.clone(),
              api_cache: RefCell::new(HashMap::new()),
-@@ -195,6 +205,12 @@ impl MoonrakerApp {
+@@ -211,6 +221,12 @@ impl MoonrakerApp {
          if let Some(upstream) = webcam_redirect {
              app.add_handler("/webcam/?(.*)", HandlerKind::WebcamRedirect { upstream: upstream.trim_end_matches('/').to_string() });
          }
