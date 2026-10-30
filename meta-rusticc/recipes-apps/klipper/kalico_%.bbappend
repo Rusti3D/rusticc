@@ -13,6 +13,11 @@ do_install:append() {
         ${D}${sysconfdir}/klipper/config/klipper-readonly/calibration.cfg
     sed -i -e 's/while COSMOS is updated/while Rusticc is updated/' \
         ${D}${sysconfdir}/klipper/config/klipper-readonly/shell.cfg
+
+    # Nozzle Z homing calibrates [load_cell_probe], not the endstop.
+    sed -i \
+        -e '/Z_OFFSET_APPLY_ENDSTOP is not supported when nozzle z homing is enabled\./c\    Z_OFFSET_APPLY_PROBE' \
+        ${D}${sysconfdir}/klipper/config/klipper-readonly/shared-macros.cfg
 }
 
 # Timelapse is disabled until it is finished (docs/TIMELAPSE.md): its
