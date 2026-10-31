@@ -16,6 +16,10 @@ do_install:append() {
 
     # Nozzle Z homing calibrates [load_cell_probe], not the endstop.
     sed -i \
+        -e '/Z_OFFSET_APPLY_ENDSTOP is not supported when nozzle z homing is enabled\./i\    {% set saved_z_offset = printer.configfile.settings["load_cell_probe"].z_offset|float|round(3) %}' \
+        -e '/Z_OFFSET_APPLY_ENDSTOP is not supported when nozzle z homing is enabled\./i\    {% set z_adjust = printer.gcode_move.homing_origin.z|float %}' \
+        -e '/Z_OFFSET_APPLY_ENDSTOP is not supported when nozzle z homing is enabled\./i\    {% set new_z_offset = (saved_z_offset - z_adjust)|round(3) %}' \
+        -e '/Z_OFFSET_APPLY_ENDSTOP is not supported when nozzle z homing is enabled\./i\    {% if z_adjust > 0 %} RESPOND MSG="Load-cell total offset: {saved_z_offset} -> {new_z_offset} (+ = away; saved sign inverted)" {% elif z_adjust < 0 %} RESPOND TYPE=error MSG="Load-cell total offset: {saved_z_offset} -> {new_z_offset} (- = closer; saved sign inverted)" {% endif %}' \
         -e '/Z_OFFSET_APPLY_ENDSTOP is not supported when nozzle z homing is enabled\./c\    Z_OFFSET_APPLY_PROBE' \
         ${D}${sysconfdir}/klipper/config/klipper-readonly/shared-macros.cfg
 }
