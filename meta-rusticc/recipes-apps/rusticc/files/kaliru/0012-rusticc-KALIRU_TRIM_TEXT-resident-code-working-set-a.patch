@@ -49,19 +49,19 @@ index 9ef6a4b..c748a94 100644
 +    });
 +}
 diff --git a/src/printer.rs b/src/printer.rs
-index 4465631..cf30f88 100644
+index 68a9a44..2562f13 100644
 --- a/src/printer.rs
 +++ b/src/printer.rs
-@@ -876,6 +876,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
- pub fn main() {
+@@ -878,6 +878,7 @@ pub fn main() {
      crate::util::fix_sigint();
+     crate::greenlet::record_main_stack();
      crate::pcprof::start();
 +    crate::pcprof::trim_text_later();
      let argv: Vec<String> = std::env::args().skip(1).collect();
-     let (options, args) = parse_args(&argv);
-     if options.import_test {
+     // the hub-ctrl tool (mcu restart_method rpi_usb runs it through sudo)
+     if argv.first().map(|a| a == "--hub-ctrl").unwrap_or(false) {
 diff --git a/src/webhooks.rs b/src/webhooks.rs
-index c623163..5a0a458 100644
+index 4a03c0c..728a3be 100644
 --- a/src/webhooks.rs
 +++ b/src/webhooks.rs
 @@ -452,7 +452,8 @@ impl ClientConnection {

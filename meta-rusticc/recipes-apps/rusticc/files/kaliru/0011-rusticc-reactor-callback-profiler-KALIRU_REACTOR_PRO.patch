@@ -108,10 +108,10 @@ index 04cf5f7..9ef6a4b 100644
 +    }
 +}
 diff --git a/src/plugins/impls/reactor.rs b/src/plugins/impls/reactor.rs
-index 8195ee1..a89cad5 100644
+index ccfef44..7acff7b 100644
 --- a/src/plugins/impls/reactor.rs
 +++ b/src/plugins/impls/reactor.rs
-@@ -81,8 +81,10 @@ fn call_reporting(cb: &PyRef, eventtime: f64) -> Option<PyRef> {
+@@ -199,8 +199,10 @@ fn call_reporting(cb: &PyRef, eventtime: f64) -> Option<PyRef> {
  fn register_timer(a: &Args) -> KResult<PyRef> {
      let reactor = a.this::<Reactor>()?;
      let cb = a.arg(0).clone();
@@ -124,10 +124,10 @@ index 8195ee1..a89cad5 100644
              Some(Err(e)) => {
                  report_unhandled(&e);
 diff --git a/src/reactor.rs b/src/reactor.rs
-index f3f7cde..3bdb9f7 100644
+index 56f455f..d220e1d 100644
 --- a/src/reactor.rs
 +++ b/src/reactor.rs
-@@ -311,7 +311,8 @@ impl Reactor {
+@@ -319,7 +319,8 @@ impl Reactor {
              if eventtime >= waketime {
                  t.waketime.set(NEVER);
                  t.timer_is_running.set(true);
@@ -137,7 +137,7 @@ index f3f7cde..3bdb9f7 100644
                  t.waketime.set(waketime);
                  t.timer_is_running.set(false);
                  if !same(&g_dispatch, &self.g_dispatch.borrow()) {
-@@ -545,7 +546,7 @@ impl Reactor {
+@@ -553,7 +554,7 @@ impl Reactor {
              let hdl = self.fds.borrow().get(&fd).cloned().unwrap_or_else(|| self.dummy_fd_hdl.clone());
              if event & self.read_mask != 0 {
                  let cb = hdl.read_callback.clone();
@@ -146,7 +146,7 @@ index f3f7cde..3bdb9f7 100644
                  if !same(&g_dispatch, &self.g_dispatch.borrow()) {
                      self.end_greenlet(g_dispatch.unwrap());
                      return self.monotonic();
-@@ -594,6 +595,7 @@ impl Reactor {
+@@ -602,6 +603,7 @@ impl Reactor {
              busy = false;
              let res = self.poll((timeout * 1000.0).ceil() as i32);
              eventtime = self.monotonic();
@@ -155,7 +155,7 @@ index f3f7cde..3bdb9f7 100644
                  busy = true;
                  eventtime = self.check_fds(eventtime, &res);
 diff --git a/src/webhooks.rs b/src/webhooks.rs
-index 5b069b4..c623163 100644
+index d1959e6..4a03c0c 100644
 --- a/src/webhooks.rs
 +++ b/src/webhooks.rs
 @@ -1031,10 +1031,11 @@ impl QueryStatusHelper {

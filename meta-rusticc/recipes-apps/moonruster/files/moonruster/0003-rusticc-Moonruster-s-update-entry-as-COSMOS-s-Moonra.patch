@@ -17,7 +17,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  delete mode 100644 src/components/update_manager/self_deploy.rs
 
 diff --git a/src/components/update_manager/mod.rs b/src/components/update_manager/mod.rs
-index a5a7a5c..73b64a3 100644
+index d950a5f..3a572a6 100644
 --- a/src/components/update_manager/mod.rs
 +++ b/src/components/update_manager/mod.rs
 @@ -8,7 +8,6 @@ pub mod git_deploy;
@@ -28,7 +28,7 @@ index a5a7a5c..73b64a3 100644
  pub mod swu_deploy;
  pub mod system_deploy;
  
-@@ -286,8 +285,9 @@ fn get_base_configuration(config: &ConfigHelper) -> Result<ConfigHelper, ConfigE
+@@ -299,8 +298,9 @@ fn get_base_configuration(config: &ConfigHelper) -> Result<ConfigHelper, ConfigE
      m.insert("pip_environment_variables".into(), "SKIP_CYTHON=Y".into());
      m.insert("path".into(), String::new());
      m.insert("managed_services".into(), "moonraker".into());
@@ -40,7 +40,7 @@ index a5a7a5c..73b64a3 100644
      base.insert("moonraker".into(), m);
      let mut k = IndexMap::new();
      k.insert("moved_origin".into(), "https://github.com/kevinoconnor/klipper.git".into());
-@@ -512,7 +512,7 @@ impl UpdateManager {
+@@ -525,7 +525,7 @@ impl UpdateManager {
          }
          let mcfg = app_config.getsection("moonraker");
          let kcfg = app_config.getsection("klipper");

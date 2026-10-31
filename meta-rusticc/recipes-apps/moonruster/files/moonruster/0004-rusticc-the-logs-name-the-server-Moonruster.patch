@@ -153,10 +153,10 @@ index 20f9018..b3bec62 100644
                      true,
                  );
 diff --git a/src/components/klippy_connection.rs b/src/components/klippy_connection.rs
-index 74fd6f1..bb07680 100644
+index fa29acb..a291070 100644
 --- a/src/components/klippy_connection.rs
 +++ b/src/components/klippy_connection.rs
-@@ -730,7 +730,7 @@ impl KlippyConnection {
+@@ -732,7 +732,7 @@ impl KlippyConnection {
          if !missing.is_empty() {
              let err_str: Vec<String> = missing.iter().map(|o| format!("[{}]", o)).collect();
              log::info!(
@@ -205,10 +205,10 @@ index 7dec1f5..0f2917e 100644
                          self.name(),
                          self.name(),
 diff --git a/src/components/update_manager/mod.rs b/src/components/update_manager/mod.rs
-index 73b64a3..8cd5ace 100644
+index 3a572a6..3cbbe10 100644
 --- a/src/components/update_manager/mod.rs
 +++ b/src/components/update_manager/mod.rs
-@@ -445,7 +445,7 @@ impl InstanceTracker {
+@@ -458,7 +458,7 @@ impl InstanceTracker {
                  if iids.len() > 1 {
                      server().add_log_rollover_item(
                          "um_multi_instance_msg",

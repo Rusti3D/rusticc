@@ -12,34 +12,54 @@ offers it. Uart::fd() for the sensor's port reads.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
 ---
- src/extras/buttons.rs                |  76 +++-
- src/extras/canvas_filament_sensor.rs | 533 +++++++++++++++++++++++++++
+ src/extras/buttons.rs                |  91 ++++-
+ src/extras/canvas_filament_sensor.rs | 536 +++++++++++++++++++++++++++
  src/extras/mod.rs                    |   3 +
  src/pins.rs                          |   5 +
+ src/plugins/impls/generated.rs       |  16 +-
  src/serialhdl.rs                     |   5 +
- 5 files changed, 610 insertions(+), 12 deletions(-)
+ 6 files changed, 642 insertions(+), 14 deletions(-)
  create mode 100644 src/extras/canvas_filament_sensor.rs
 
 diff --git a/src/extras/buttons.rs b/src/extras/buttons.rs
-index 277ce8b..567a644 100644
+index 12c9bc0..1f03f93 100644
 --- a/src/extras/buttons.rs
 +++ b/src/extras/buttons.rs
-@@ -7,7 +7,8 @@ use crate::configfile::{ConfigWrapper, Lim};
+@@ -7,6 +7,7 @@ use crate::configfile::{ConfigWrapper, Lim};
  use crate::error::{KError, KResult};
  use crate::extras::query_adc::QueryADC;
  use crate::logging;
--use crate::mcu::{get_printer_mcu, ints, pint, CommandWrapper, Mcu};
 +use crate::chelper::serialqueue::CommandQueue;
-+use crate::mcu::{get_printer_mcu, ints, pint, Mcu};
+ use crate::mcu::{get_printer_mcu, ints, pint, CommandWrapper, Mcu};
  use crate::msgproto::{Params, Val};
  use crate::pins::PinsObject;
- use crate::printer::{PObj, Printer, PrinterObject};
-@@ -42,20 +43,66 @@ fn run_callback(reactor: &Reactor, cb: ButtonCallback, eventtime_override: Optio
+@@ -15,6 +16,7 @@ use crate::pyfmt::{py_max, py_min, py_strip};
+ use crate::reactor::Reactor;
+ use crate::IndexMap;
+ use std::cell::{Cell, RefCell};
++use std::any::Any;
+ use std::rc::Rc;
+ 
+ /// callback(eventtime, state)
+@@ -42,20 +44,82 @@ fn run_callback(reactor: &Reactor, cb: ButtonCallback, eventtime_override: Optio
  pub const QUERY_TIME: f64 = 0.002;
  pub const RETRANSMIT_COUNT: i64 = 50;
  
-+/// a command MCU_buttons sends (buttons_ack)
-+pub type ButtonsCommand = Rc<dyn Fn(&[Val]) -> KResult<()>>;
++/// a command MCU_buttons sends (buttons_ack): the MCU's, or a pin chip's own
++#[derive(Clone)]
++pub enum ButtonsCommand {
++    Mcu(CommandWrapper),
++    Chip(Rc<dyn Fn(&[Val]) -> KResult<()>>),
++}
++
++impl ButtonsCommand {
++    pub fn send(&self, data: &[Val]) -> KResult<()> {
++        match self {
++            ButtonsCommand::Mcu(c) => c.send(data, 0, 0),
++            ButtonsCommand::Chip(f) => f(data),
++        }
++    }
++}
 +
 +/// The MCU calls MCU_buttons makes. Python takes any object that has these
 +/// methods: kaliru's MCUs, and pin chips that answer them themselves
@@ -53,6 +73,7 @@ index 277ce8b..567a644 100644
 +    fn get_query_slot(&self, oid: i64) -> i64;
 +    fn seconds_to_clock(&self, time: f64) -> i64;
 +    fn register_response(&self, cb: Rc<dyn Fn(&Params) -> KResult<()>>, msg: &str, oid: i64);
++    fn as_any(self: Rc<Self>) -> Rc<dyn Any>;
 +}
 +
 +impl ButtonsHost for Mcu {
@@ -70,8 +91,7 @@ index 277ce8b..567a644 100644
 +        Some(Mcu::alloc_command_queue(self))
 +    }
 +    fn lookup_command(&self, msgformat: &str, cq: Option<CommandQueue>) -> KResult<ButtonsCommand> {
-+        let cmd = Mcu::lookup_command(self, msgformat, cq)?;
-+        Ok(Rc::new(move |data| cmd.send(data, 0, 0)))
++        Ok(ButtonsCommand::Mcu(Mcu::lookup_command(self, msgformat, cq)?))
 +    }
 +    fn get_query_slot(&self, oid: i64) -> i64 {
 +        Mcu::get_query_slot(self, oid)
@@ -82,29 +102,32 @@ index 277ce8b..567a644 100644
 +    fn register_response(&self, cb: Rc<dyn Fn(&Params) -> KResult<()>>, msg: &str, oid: i64) {
 +        Mcu::register_response(self, Some(cb), msg, Some(oid))
 +    }
++    fn as_any(self: Rc<Self>) -> Rc<dyn Any> {
++        self
++    }
 +}
 +
  pub struct McuButtons {
-     reactor: Rc<Reactor>,
--    mcu: Rc<Mcu>,
-+    mcu: Rc<dyn ButtonsHost>,
-     pin_list: RefCell<Vec<(String, i64)>>,
-     callbacks: RefCell<Vec<(i64, i64, ButtonCallback)>>,
-     invert: Cell<i64>,
-     last_button: Cell<i64>,
--    ack_cmd: RefCell<Option<CommandWrapper>>,
-+    ack_cmd: RefCell<Option<ButtonsCommand>>,
-     ack_count: Cell<i64>,
-     oid: Cell<i64>,
+     pub reactor: Rc<Reactor>,
+-    pub mcu: Rc<Mcu>,
++    pub mcu: Rc<dyn ButtonsHost>,
+     pub pin_list: RefCell<Vec<(String, i64)>>,
+     pub callbacks: RefCell<Vec<(i64, i64, ButtonCallback)>>,
+     pub invert: Cell<i64>,
+     pub last_button: Cell<i64>,
+-    pub ack_cmd: RefCell<Option<CommandWrapper>>,
++    pub ack_cmd: RefCell<Option<ButtonsCommand>>,
+     pub ack_count: Cell<i64>,
+     pub oid: Cell<i64>,
  }
  
  impl McuButtons {
--    fn new(printer: &Printer, mcu: &Rc<Mcu>) -> Rc<Self> {
-+    fn new(printer: &Printer, mcu: &Rc<dyn ButtonsHost>) -> Rc<Self> {
+-    pub fn new(printer: &Printer, mcu: &Rc<Mcu>) -> Rc<Self> {
++    pub fn new(printer: &Printer, mcu: &Rc<dyn ButtonsHost>) -> Rc<Self> {
          let b = Rc::new(McuButtons {
              reactor: printer.get_reactor(),
              mcu: mcu.clone(),
-@@ -97,12 +144,12 @@ impl McuButtons {
+@@ -97,12 +161,12 @@ impl McuButtons {
          self.last_button.set(0);
          let oid = self.mcu.create_oid();
          self.oid.set(oid);
@@ -120,7 +143,7 @@ index 277ce8b..567a644 100644
          let clock = self.mcu.get_query_slot(oid);
          let rest_ticks = self.mcu.seconds_to_clock(QUERY_TIME);
          self.mcu.add_config_cmd(
-@@ -116,9 +163,9 @@ impl McuButtons {
+@@ -116,9 +180,9 @@ impl McuButtons {
              ),
              true,
              false,
@@ -132,16 +155,16 @@ index 277ce8b..567a644 100644
          Ok(())
      }
  
-@@ -154,7 +201,7 @@ impl McuButtons {
+@@ -154,7 +218,7 @@ impl McuButtons {
          let new_buttons = buttons[start..].to_vec();
          // Send ack to MCU
          if let Some(cmd) = self.ack_cmd.borrow().as_ref() {
 -            cmd.send(&ints(&[self.oid.get(), new_count]), 0, 0)?;
-+            cmd(&ints(&[self.oid.get(), new_count]))?;
++            cmd.send(&ints(&[self.oid.get(), new_count]))?;
          }
          self.ack_count.set(self.ack_count.get() + new_count);
          // Invoke callbacks with this event in main thread
-@@ -513,9 +560,10 @@ impl PrinterButtons {
+@@ -515,9 +579,10 @@ impl PrinterButtons {
              pin_params_list.push((p.pin.clone(), p.invert, p.pullup));
          }
          let mcu_name = mcu_name.unwrap_or_default();
@@ -153,7 +176,7 @@ index 277ce8b..567a644 100644
              let build_config: Rc<dyn Fn() -> KResult<()>> =
                  Rc::new(|| Err(KError::Other("kaliru: button config on a python plugin's chip is not mirrored".into())));
              if let Some(res) = chip.register_config_callback(build_config) {
-@@ -527,7 +575,11 @@ impl PrinterButtons {
+@@ -529,7 +594,11 @@ impl PrinterButtons {
          let mcu_buttons = match existing {
              Some(b) if b.pin_list.borrow().len() + pin_params_list.len() <= 8 => b,
              _ => {
@@ -168,10 +191,10 @@ index 277ce8b..567a644 100644
                  self.mcu_buttons.borrow_mut().insert(mcu_name, b.clone());
 diff --git a/src/extras/canvas_filament_sensor.rs b/src/extras/canvas_filament_sensor.rs
 new file mode 100644
-index 0000000..2208aef
+index 0000000..76a326a
 --- /dev/null
 +++ b/src/extras/canvas_filament_sensor.rs
-@@ -0,0 +1,533 @@
+@@ -0,0 +1,536 @@
 +// Centauri Carbon 2 filament sensor as virtual input pins (emulated MCU)
 +// (port of COSMOS's klippy/extras/canvas_filament_sensor.py)
 +//
@@ -663,10 +686,13 @@ index 0000000..2208aef
 +    fn lookup_command(&self, _msgformat: &str, _cq: Option<CommandQueue>) -> KResult<ButtonsCommand> {
 +        // Only "buttons_ack oid=%c count=%c"
 +        let w = self.me.clone();
-+        Ok(Rc::new(move |data| match w.upgrade() {
++        Ok(ButtonsCommand::Chip(Rc::new(move |data| match w.upgrade() {
 +            Some(s) => s.handle_ack(data),
 +            None => Ok(()),
-+        }))
++        })))
++    }
++    fn as_any(self: Rc<Self>) -> Rc<dyn std::any::Any> {
++        self
 +    }
 +    fn get_query_slot(&self, _oid: i64) -> i64 {
 +        0
@@ -727,12 +753,12 @@ index 4a2aa55..e04429b 100644
      PrinterModule { name: "controller_fan", ported: true, load_config: None, load_config_prefix: Some(controller_fan::load_config_prefix), register_components: None },
      PrinterModule { name: "dac084S085", ported: true, load_config: None, load_config_prefix: Some(dac084s085::load_config_prefix), register_components: None },
 diff --git a/src/pins.rs b/src/pins.rs
-index 41331a6..025b364 100644
+index aca70ea..09b2321 100644
 --- a/src/pins.rs
 +++ b/src/pins.rs
-@@ -45,6 +45,11 @@ pub trait PinChip {
-     fn python_object(&self) -> Option<Rc<dyn Any>> {
-         None
+@@ -50,6 +50,11 @@ pub trait PinChip: Any {
+     fn type_name(&self) -> &'static str {
+         std::any::type_name::<Self>()
      }
 +    /// a chip that answers MCU_buttons' MCU calls itself (None: its
 +    /// buttons go through its MCU)
@@ -742,11 +768,52 @@ index 41331a6..025b364 100644
  }
  
  /// The pin_params dict. Shared: lookup_pin() hands the same object to every
+diff --git a/src/plugins/impls/generated.rs b/src/plugins/impls/generated.rs
+index 3a32994..2c1dcae 100644
+--- a/src/plugins/impls/generated.rs
++++ b/src/plugins/impls/generated.rs
+@@ -1499,7 +1499,7 @@ pub fn register(r: &mut Registry) {
+     // ---- klippy.extras.buttons
+     r.ctor("klippy.extras.buttons.MCU_buttons.__init__", |a| {
+         let p0 = objects::unwrap_as::<crate::printer::Printer>(a.arg(0))?;
+-        let p1 = objects::unwrap_as::<crate::mcu::Mcu>(a.arg(1))?;
++        let p1: Rc<dyn crate::extras::buttons::ButtonsHost> = objects::unwrap_as::<crate::mcu::Mcu>(a.arg(1))?;
+         let o: Rc<dyn Any> = crate::extras::buttons::McuButtons::new(&p0, &p1);
+         Ok(o)
+     });
+@@ -1512,7 +1512,14 @@ pub fn register(r: &mut Registry) {
+         let p0 = super::mcu::params_from_py(a.arg(0))?;
+         s.handle_buttons_state(&p0).to_py()
+     });
+-    r.attr("klippy.extras.buttons.MCU_buttons.ack_cmd", |o| (match objects::unwrap_as::<crate::extras::buttons::McuButtons>(o)?.ack_cmd.borrow().clone() { Some(v) => objects::wrap(Rc::new(v)), None => Ok(py_none()) }), None);
++    r.attr("klippy.extras.buttons.MCU_buttons.ack_cmd", |o| (match objects::unwrap_as::<crate::extras::buttons::McuButtons>(o)?.ack_cmd.borrow().clone() {
++        Some(crate::extras::buttons::ButtonsCommand::Mcu(v)) => objects::wrap(Rc::new(v)),
++        Some(crate::extras::buttons::ButtonsCommand::Chip(f)) => crate::plugins::callable::py_function(Rc::new(move |a: &[PyRef]| {
++            f(&super::mcu::data_from_py(&a[0])?)?;
++            Ok(py_none())
++        })),
++        None => Ok(py_none()),
++    }), None);
+     r.attr("klippy.extras.buttons.MCU_buttons.ack_count", |o| objects::unwrap_as::<crate::extras::buttons::McuButtons>(o)?.ack_count.get().to_py(), Some(|o, v| {
+         objects::unwrap_as::<crate::extras::buttons::McuButtons>(o)?.ack_count.set(FromPy::from_py(v)?);
+         Ok(())
+@@ -1525,7 +1532,10 @@ pub fn register(r: &mut Registry) {
+         objects::unwrap_as::<crate::extras::buttons::McuButtons>(o)?.last_button.set(FromPy::from_py(v)?);
+         Ok(())
+     }));
+-    r.attr("klippy.extras.buttons.MCU_buttons.mcu", |o| objects::unwrap_as::<crate::extras::buttons::McuButtons>(o)?.mcu.clone().to_py(), None);
++    r.attr("klippy.extras.buttons.MCU_buttons.mcu", |o| match objects::unwrap_as::<crate::extras::buttons::McuButtons>(o)?.mcu.clone().as_any().downcast::<crate::mcu::Mcu>() {
++        Ok(m) => m.to_py(),
++        Err(_) => Err(KError::Py("AttributeError".into(), "kaliru: MCU_buttons of a pin chip has no MCU".into())),
++    }, None);
+     r.attr("klippy.extras.buttons.MCU_buttons.oid", |o| objects::unwrap_as::<crate::extras::buttons::McuButtons>(o)?.oid.get().to_py(), Some(|o, v| {
+         objects::unwrap_as::<crate::extras::buttons::McuButtons>(o)?.oid.set(FromPy::from_py(v)?);
+         Ok(())
 diff --git a/src/serialhdl.rs b/src/serialhdl.rs
-index c892096..71c389c 100644
+index e7713ad..a707d3e 100644
 --- a/src/serialhdl.rs
 +++ b/src/serialhdl.rs
-@@ -807,6 +807,11 @@ fn custom_baud_error(baud: u32) -> KError {
+@@ -838,6 +838,11 @@ fn custom_baud_error(baud: u32) -> KError {
  }
  
  impl Uart {

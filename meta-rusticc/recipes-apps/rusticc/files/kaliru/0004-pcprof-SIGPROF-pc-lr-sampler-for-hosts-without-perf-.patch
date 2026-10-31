@@ -114,17 +114,17 @@ index 0000000..5f9fd3e
 +    });
 +}
 diff --git a/src/printer.rs b/src/printer.rs
-index 02ac0fc..4465631 100644
+index 3f04ae7..68a9a44 100644
 --- a/src/printer.rs
 +++ b/src/printer.rs
-@@ -875,6 +875,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
- 
+@@ -877,6 +877,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
  pub fn main() {
      crate::util::fix_sigint();
+     crate::greenlet::record_main_stack();
 +    crate::pcprof::start();
      let argv: Vec<String> = std::env::args().skip(1).collect();
-     let (options, args) = parse_args(&argv);
-     if options.import_test {
+     // the hub-ctrl tool (mcu restart_method rpi_usb runs it through sudo)
+     if argv.first().map(|a| a == "--hub-ctrl").unwrap_or(false) {
 diff --git a/tools/pcprof_report.py b/tools/pcprof_report.py
 new file mode 100644
 index 0000000..88b3c03

@@ -40,7 +40,7 @@ index a11afe8..a26a919 100644
  name = "reactortest"
  path = "src/bin/reactortest.rs"
 diff --git a/docs/PARITY.md b/docs/PARITY.md
-index 30e24ce..1a74eed 100644
+index 834c301..901bdbe 100644
 --- a/docs/PARITY.md
 +++ b/docs/PARITY.md
 @@ -30,7 +30,7 @@ What must match per run: serialqueue trace, exit code, masked log (see `tools/re

@@ -27,8 +27,13 @@ COSMOS git log, and read-only inspection of the user's CC1 (192.168.1.148).
 
 | | Kalico commit |
 |---|---|
-| COSMOS (`SRCREV`) | 26e46bd |
-| kaliru | 5b59427 |
+| COSMOS (`SRCREV`) | 0057b6a (COSMOS 26.10.0; 26e46bd before) |
+| kaliru | 550d21fb (5b59427 before) |
+
+2026-10-31: COSMOS 26.10.0 moved to Kalico 0057b6a (5b59427 + 8). kaliru ported upstream Kalico to 550d21fb
+(0057b6a + 13: spi_flash, mcu wrapper errors, dummy query responses, ack waits failed on timeout, tests). The
+reference is now 550d21fb plus COSMOS's patches (the cosmos submodule), and the image's python klippy tree stays
+COSMOS's 0057b6a.
 
 kaliru's base is 58 commits newer than COSMOS's. The klippy side of those 58 commits:
 - the mcu.py split into helper classes and the error_mcu module;

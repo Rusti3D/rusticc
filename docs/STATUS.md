@@ -67,9 +67,14 @@ Its logo is `branding/Rusticc.png`, which replaces the OpenCentauri/COSMOS logo.
 - kaliru (github.com/Rusti3D/kaliru) is Kalico in Rust, identical to Kalico. Rusticc's changes to it are the patch
   series in `meta-rusticc/recipes-apps/rusticc/files/kaliru`, one patch per change (the COSMOS patch it ports, or
   a Rusticc addition such as the profilers); `tools/kaliru-tree.sh` / `kaliru-export.sh` work on them.
-- The reference for parity is Kalico 5b59427 with COSMOS's patches applied (`tools/make_ref.sh DEST`).
+- The reference for parity is Kalico 550d21fb with COSMOS's patches applied (`tools/make_ref.sh DEST`, the cosmos
+  submodule's patches; 5b59427 until 2026-10-31).
 - `docs/cosmos_audit.md` covers every COSMOS change: what it does, why COSMOS made it, and what Rusticc does about it.
-- `reference-patches/` holds the COSMOS patches that had to be rebased onto 5b59427 for the reference.
+- `reference-patches/` holds the COSMOS patches that had to be rebased onto kaliru's base for the reference.
+- 2026-10-31 sync: COSMOS 26.10.0 (submodule 947b379), kaliru bbb8f0c (Kalico 550d21fb), Moonruster a5e5551
+  (Moonraker b559b9a). Ported: hx711s per-batch errors / overflows, the HiFi4 RPMsg RX task, `addons init` in
+  moonraker-init-d (+ `addon` RDEPENDS). Firmware images rebuilt (8/8 identical to COSMOS's C build). Parity:
+  cases 20/20, CC1 and Canvas only the known AFC print_version traceback lines.
 
 ## Status (2026-10-25)
 

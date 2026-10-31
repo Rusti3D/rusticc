@@ -10,7 +10,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 20 insertions(+)
 
 diff --git a/src/webhooks.rs b/src/webhooks.rs
-index 79cb3f6..e52a65f 100644
+index 202ff1b..60f8d07 100644
 --- a/src/webhooks.rs
 +++ b/src/webhooks.rs
 @@ -971,6 +971,26 @@ impl QueryStatusHelper {

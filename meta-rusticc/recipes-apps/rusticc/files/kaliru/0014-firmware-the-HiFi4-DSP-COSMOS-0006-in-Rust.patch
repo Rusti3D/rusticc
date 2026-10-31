@@ -24,7 +24,7 @@ Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
 ---
  firmware/build/hifi4.ld                       | 145 +++++++
  firmware/build/main.rs                        |  33 +-
- firmware/configs/cosmos-cc1-dsp/autoconf.h    | 393 ++++++++++++++++++
+ firmware/configs/cosmos-cc1-dsp/autoconf.h    | 394 ++++++++++++++++++
  firmware/configs/cosmos-cc1-dsp/config        |  79 ++++
  firmware/configs/cosmos-cc1-dsp/defconfig     |  12 +
  firmware/src/generic/mod.rs                   |   2 +-
@@ -43,17 +43,17 @@ Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
  firmware/src/hifi4/main.rs                    |  29 ++
  firmware/src/hifi4/mod.rs                     |  37 ++
  firmware/src/hifi4/resource_table.rs          |  99 +++++
- firmware/src/hifi4/rpmsg.rs                   | 325 +++++++++++++++
- firmware/src/hifi4/rpmsg_transport.rs         |  73 ++++
+ firmware/src/hifi4/rpmsg.rs                   | 326 +++++++++++++++
+ firmware/src/hifi4/rpmsg_transport.rs         |  86 ++++
  firmware/src/hifi4/startup.rs                 | 352 ++++++++++++++++
  firmware/src/hifi4/timer.rs                   |  73 ++++
  firmware/src/hifi4/watchdog.rs                |  33 ++
  firmware/src/main.rs                          |   8 +-
  firmware/targets/xtensa-hifi4-none-elf.json   |  22 +
  firmware/tests/ctr_check.sh                   |   6 +
- .../cosmos-cc1-dsp_compile_time_request.txt   | 126 ++++++
+ .../cosmos-cc1-dsp_compile_time_request.txt   | 127 ++++++
  .../tests/ref/cosmos-cc1-dsp_klipper.dict     |   1 +
- 31 files changed, 2995 insertions(+), 4 deletions(-)
+ 31 files changed, 3011 insertions(+), 4 deletions(-)
  create mode 100644 firmware/build/hifi4.ld
  create mode 100644 firmware/configs/cosmos-cc1-dsp/autoconf.h
  create mode 100644 firmware/configs/cosmos-cc1-dsp/config
@@ -234,10 +234,10 @@ index 0000000..caf386e
 +    _end = .;
 +}
 diff --git a/firmware/build/main.rs b/firmware/build/main.rs
-index e4a75e3..d44cd91 100644
+index 27cc6e6..4ad02bc 100644
 --- a/firmware/build/main.rs
 +++ b/firmware/build/main.rs
-@@ -329,6 +329,22 @@ fn sources(config: &kconfig::Config) -> Vec<&'static str> {
+@@ -330,6 +330,22 @@ fn sources(config: &kconfig::Config) -> Vec<&'static str> {
                  out.extend(*files);
              }
          }
@@ -260,7 +260,7 @@ index e4a75e3..d44cd91 100644
      } else if on("CONFIG_MACH_SIMU") {
          // src/simulator/Makefile
          out.extend(["simulator/main.rs", "simulator/gpio.rs", "simulator/timer.rs", "simulator/serial.rs"]);
-@@ -571,6 +587,14 @@ fn main() {
+@@ -572,6 +588,14 @@ fn main() {
          println!("cargo:rustc-link-arg=--entry=_text_vectortable_start");
      }
  
@@ -275,7 +275,7 @@ index e4a75e3..d44cd91 100644
      // scan: per file, the requests come out in reverse source order (as
      // gcc emits a file's .compile_time_request section)
      let src = root.join("src");
-@@ -588,9 +612,14 @@ fn main() {
+@@ -589,9 +613,14 @@ fn main() {
          scanned.push((*f, s));
      }
      let mut requests = vec![];
@@ -294,10 +294,10 @@ index e4a75e3..d44cd91 100644
      }
 diff --git a/firmware/configs/cosmos-cc1-dsp/autoconf.h b/firmware/configs/cosmos-cc1-dsp/autoconf.h
 new file mode 100644
-index 0000000..5dbb131
+index 0000000..4ab1b2c
 --- /dev/null
 +++ b/firmware/configs/cosmos-cc1-dsp/autoconf.h
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,394 @@
 +#define CONFIG_LOW_LEVEL_OPTIONS 1
 +#define CONFIG_MACH_AVR 0
 +#define CONFIG_MACH_ATSAM 0
@@ -646,6 +646,7 @@ index 0000000..5dbb131
 +#define CONFIG_WANT_HARD_PWM 0
 +#define CONFIG_WANT_BUTTONS 1
 +#define CONFIG_WANT_TMCUART 1
++#define CONFIG_WANT_TMC_SPI_ENDSTOP 0
 +#define CONFIG_WANT_NEOPIXEL 0
 +#define CONFIG_WANT_PULSE_COUNTER 1
 +#define CONFIG_WANT_DRV8833 0
@@ -809,7 +810,7 @@ index 391b846..37ef7ce 100644
  pub mod usb_cdc;
 diff --git a/firmware/src/hifi4/com.rs b/firmware/src/hifi4/com.rs
 new file mode 100644
-index 0000000..a68c7aa
+index 0000000..a0e66f2
 --- /dev/null
 +++ b/firmware/src/hifi4/com.rs
 @@ -0,0 +1,134 @@
@@ -852,7 +853,7 @@ index 0000000..a68c7aa
 +
 +static RPMSG_CONSUME_WAKE: Global<TaskWake> = Global::new(TaskWake::new());
 +
-+// Called from the RPMsg endpoint callback (interrupt context): copy the
++// Called from the RPMsg RX task (or during transport initialization): copy the
 +// payload into the receive buffer (dropping what does not fit)
 +pub fn rpmsg_notify_rx(data: &[u8]) {
 +    let rpos = *RECEIVE_POS.get() as usize;
@@ -2215,10 +2216,10 @@ index 0000000..4025e43
 +};
 diff --git a/firmware/src/hifi4/rpmsg.rs b/firmware/src/hifi4/rpmsg.rs
 new file mode 100644
-index 0000000..88b4509
+index 0000000..3078118
 --- /dev/null
 +++ b/firmware/src/hifi4/rpmsg.rs
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,326 @@
 +// Minimal RPMsg/virtio implementation for bare-metal HiFi4 DSP
 +// (src/hifi4/rpmsg.c, rpmsg.h, virtio_vring.h).
 +//
@@ -2467,7 +2468,8 @@ index 0000000..88b4509
 +    rpmsg_send(ept.addr, ept.dst, data)
 +}
 +
-+// Process incoming messages (from the MSGBOX interrupt): the deferred name
++// Process incoming messages (during initialization or from a cooperative
++// task, never from an irq): the deferred name
 +// service announcements, then the RX vring's messages to their endpoints
 +pub fn rpmsg_process() -> i32 {
 +    let st = STATE.get();
@@ -2546,10 +2548,10 @@ index 0000000..88b4509
 +}
 diff --git a/firmware/src/hifi4/rpmsg_transport.rs b/firmware/src/hifi4/rpmsg_transport.rs
 new file mode 100644
-index 0000000..bd9614d
+index 0000000..ebfc39f
 --- /dev/null
 +++ b/firmware/src/hifi4/rpmsg_transport.rs
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,86 @@
 +// RPMsg transport integration for HiFi4 DSP: the MSGBOX hardware kicks
 +// and the RPMsg virtio layer (src/hifi4/rpmsg_transport.c).
 +//
@@ -2563,8 +2565,9 @@ index 0000000..bd9614d
 +    rpmsg_clear_pending_announcements, rpmsg_create_ept, rpmsg_init, rpmsg_process, rpmsg_sync_indices, rpmsg_tx_avail_idx, RPMSG_NUM_BUFS,
 +    VRING_RX_ADDR, VRING_TX_ADDR,
 +};
-+use crate::decl_init;
-+use crate::sched::R;
++use crate::ctr::Global;
++use crate::sched::{sched_check_wake, sched_wake_task, TaskWake, R};
++use crate::{decl_init, decl_task};
 +
 +// The MSGBOX channels of the RPMsg kicks (the mboxes of the device tree)
 +const MSGBOX_RPMSG_RX_CHANNEL: u8 = 0;
@@ -2575,10 +2578,22 @@ index 0000000..bd9614d
 +    msgbox_send(MSGBOX_RPMSG_TX_CHANNEL, vq_id);
 +}
 +
-+// Linux kicked us: process its messages
++static RPMSG_RX_WAKE: Global<TaskWake> = Global::new(TaskWake::new());
++
++// Linux kicked us: wake the RX task (vring processing stays out of
++// interrupt context)
 +fn rpmsg_msgbox_rx_callback(_channel: u8, _message: u32) {
-+    rpmsg_process();
++    sched_wake_task(RPMSG_RX_WAKE.ptr());
 +}
++
++pub fn rpmsg_rx_task() -> R {
++    if !sched_check_wake(RPMSG_RX_WAKE.ptr()) {
++        return Ok(());
++    }
++    rpmsg_process();
++    Ok(())
++}
++decl_task!(rpmsg_rx_task);
 +
 +// Linux's messages to the "rpmsg-tty" endpoint: the command receive
 +// pipeline
@@ -3100,7 +3115,7 @@ index 0000000..ea4999f
 +}
 +decl_init!(watchdog_hw_init);
 diff --git a/firmware/src/main.rs b/firmware/src/main.rs
-index e82fa2c..e75e3dc 100644
+index d03f404..bd838e1 100644
 --- a/firmware/src/main.rs
 +++ b/firmware/src/main.rs
 @@ -4,8 +4,10 @@
@@ -3115,7 +3130,7 @@ index e82fa2c..e75e3dc 100644
  
  #[allow(non_upper_case_globals, dead_code)]
  pub mod config {
-@@ -129,6 +131,10 @@ pub use hc32f460 as board;
+@@ -131,6 +133,10 @@ pub use hc32f460 as board;
  pub mod avr;
  #[cfg(CONFIG_MACH_AVR)]
  pub use avr as board;
@@ -3173,10 +3188,10 @@ index af9852b..4ef338e 100644
      elif grep -q "CONFIG_MACH_STM32F4 1\|CONFIG_MACH_STM32F7 1\|CONFIG_MACH_STM32G4 1\|CONFIG_MACH_STM32L4 1\|CONFIG_MACH_STM32H7 1\|CONFIG_MACH_N32G45x 1\|CONFIG_MACH_SAM4 1\|CONFIG_MACH_SAME70 1\|CONFIG_MACH_SAMX5 1\|CONFIG_MACH_HC32F460 1" $a; then
 diff --git a/firmware/tests/ref/cosmos-cc1-dsp_compile_time_request.txt b/firmware/tests/ref/cosmos-cc1-dsp_compile_time_request.txt
 new file mode 100644
-index 0000000..40ba943
+index 0000000..510f446
 --- /dev/null
 +++ b/firmware/tests/ref/cosmos-cc1-dsp_compile_time_request.txt
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,127 @@
 +_DECL_STATIC_STR sentinel timer called
 +_DECL_STATIC_STR Timer too close
 +_DECL_STATIC_STR Shutdown cleared when not shutdown
@@ -3290,6 +3305,7 @@ index 0000000..40ba943
 +DECL_CONSTANT ADC_MAX +0x00000FFF
 +_DECL_STATIC_STR Not a valid ADC pin
 +_DECL_CALLLIST ctr_run_initfuncs adc_init
++_DECL_CALLLIST ctr_run_taskfuncs rpmsg_rx_task
 +_DECL_CALLLIST ctr_run_initfuncs rpmsg_transport_init
 +DECL_CONSTANT RECEIVE_WINDOW +0x000000C0
 +DECL_CONSTANT TRANSMIT_WINDOW +0x000000C0
@@ -3305,9 +3321,9 @@ index 0000000..40ba943
 +_DECL_CALLLIST ctr_run_taskfuncs timer_task
 diff --git a/firmware/tests/ref/cosmos-cc1-dsp_klipper.dict b/firmware/tests/ref/cosmos-cc1-dsp_klipper.dict
 new file mode 100644
-index 0000000..f277ebc
+index 0000000..ace18a2
 --- /dev/null
 +++ b/firmware/tests/ref/cosmos-cc1-dsp_klipper.dict
 @@ -0,0 +1 @@
-+{"app":"Kalico","build_versions":"gcc: (Zephyr SDK 0.17.4) 12.2.0 binutils: (Zephyr SDK 0.17.4) 2.38","commands":{"allocate_oids count=%c":2,"buttons_ack oid=%c count=%c":36,"buttons_add oid=%c pos=%c pin=%u pull_up=%c":34,"buttons_query oid=%c clock=%u rest_ticks=%u retransmit_count=%c invert=%c":35,"clear_shutdown":8,"config_analog_in oid=%c pin=%u":31,"config_buttons oid=%c button_count=%c":33,"config_counter oid=%c pin=%u pull_up=%c":39,"config_digital_out oid=%c pin=%u value=%c default_value=%c max_duration=%u":13,"config_endstop oid=%c pin=%c pull_up=%c":24,"config_stepper oid=%c step_pin=%c dir_pin=%c invert_step=%c step_pulse_ticks=%u":18,"config_tmcuart oid=%c rx_pin=%u pull_up=%c tx_pin=%u bit_time=%u":37,"config_trsync oid=%c":27,"debug_nop":12,"debug_ping data=%*s":11,"debug_read order=%c addr=%u":9,"debug_write order=%c addr=%u val=%u":10,"emergency_stop":7,"endstop_home oid=%c clock=%u sample_ticks=%u sample_count=%c rest_ticks=%u pin_value=%c trsync_oid=%c trigger_reason=%c":25,"endstop_query_state oid=%c":26,"finalize_config crc=%u":4,"get_clock":5,"get_config":3,"get_uptime":6,"identify offset=%u count=%c":1,"query_analog_in oid=%c clock=%u sample_ticks=%u sample_count=%c rest_ticks=%u min_value=%hu max_value=%hu range_check_count=%c":32,"query_counter oid=%c clock=%u poll_ticks=%u sample_ticks=%u":40,"queue_digital_out oid=%c clock=%u on_ticks=%u":15,"queue_step oid=%c interval=%u count=%hu add=%hi":19,"reset":41,"reset_step_clock oid=%c clock=%u":21,"set_digital_out pin=%u value=%c":17,"set_digital_out_pwm_cycle oid=%c cycle_ticks=%u":14,"set_next_step_dir oid=%c dir=%c":20,"stepper_get_position oid=%c":22,"stepper_stop_on_trigger oid=%c trsync_oid=%c":23,"tmcuart_send oid=%c write=%*s read=%c":38,"trsync_set_timeout oid=%c clock=%u":29,"trsync_start oid=%c report_clock=%u report_ticks=%u expire_reason=%c":28,"trsync_trigger oid=%c reason=%c":30,"update_digital_out oid=%c value=%c":16},"config":{"ADC_MAX":4095,"CLOCK_FREQ":600000000,"RECEIVE_WINDOW":192,"STATS_SUMSQ_BASE":256,"STEPPER_STEP_BOTH_EDGE":1,"TRANSMIT_WINDOW":192},"enumerations":{"pin":{"PB0":[32,16],"PC0":[64,8],"PD0":[96,23],"PE0":[128,18],"PF0":[160,7],"PG0":[192,19]},"static_string_id":{"ADC out of range":26,"Already finalized":12,"Can not set soft pwm cycle ticks while updates pending":20,"Can't add signal that is already active":25,"Can't assign oid":14,"Can't reset time when stepper active":24,"Command parser error":5,"Command request":17,"Invalid buttons retransmit count":29,"Invalid command":7,"Invalid count parameter":23,"Invalid move request size":11,"Invalid oid type":13,"Max of 8 buttons":27,"Message encode error":6,"Missed scheduling of next digital out event":18,"Move queue overflow":10,"Not a valid ADC pin":31,"Rescheduled timer in the past":32,"Scheduled digital out event will exceed max_duration":19,"Set button past maximum button count":28,"Shutdown cleared when not shutdown":4,"Stepper too far in past":22,"Timer too close":3,"alloc_chunk failed":8,"alloc_chunks failed":9,"config_reset only available when shutdown":16,"oids already allocated":15,"sentinel timer called":2,"tmcuart data too large":30,"update_digital_out not valid with active queue":21}},"kconfig":"CONFIG_LOW_LEVEL_OPTIONS=y\nCONFIG_MACH_HIFI4=y\n# CONFIG_WANT_SOFTWARE_SPI is not set\n# CONFIG_WANT_SOFTWARE_I2C is not set\n# CONFIG_WANT_HARD_PWM is not set\n# CONFIG_WANT_NEOPIXEL is not set\n# CONFIG_WANT_ST7920 is not set\n# CONFIG_WANT_HD44780 is not set\n# CONFIG_WANT_HX71X is not set\n# CONFIG_WANT_HX711S is not set\n# CONFIG_WANT_CS1237 is not set\n# CONFIG_WANT_GPIO_SPI is not set\n","license":"GNU GPLv3","responses":{"analog_in_state oid=%c next_clock=%u value=%hu":54,"buttons_state oid=%c ack_count=%c state=%*s":55,"clock clock=%u":46,"config is_config=%c crc=%u is_shutdown=%c move_count=%hu":45,"counter_state oid=%c next_clock=%u count=%u count_clock=%u":57,"debug_result val=%u":49,"endstop_state oid=%c homing=%c next_clock=%u pin_value=%c":52,"identify_response offset=%u data=%.*s":0,"is_shutdown static_string_id=%hu":43,"pong data=%*s":50,"shutdown clock=%u static_string_id=%hu":42,"starting":44,"stats count=%u sum=%u sumsq=%u":48,"stepper_position oid=%c pos=%i":51,"tmcuart_response oid=%c read=%*s":56,"trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u":53,"uptime high=%u clock=%u":47},"version":"Release - test-20261025_030824-PIGSTATION"}
++{"app":"Kalico","build_versions":"gcc: (Zephyr SDK 0.17.4) 12.2.0 binutils: (Zephyr SDK 0.17.4) 2.38","commands":{"allocate_oids count=%c":2,"buttons_ack oid=%c count=%c":36,"buttons_add oid=%c pos=%c pin=%u pull_up=%c":34,"buttons_query oid=%c clock=%u rest_ticks=%u retransmit_count=%c invert=%c":35,"clear_shutdown":8,"config_analog_in oid=%c pin=%u":31,"config_buttons oid=%c button_count=%c":33,"config_counter oid=%c pin=%u pull_up=%c":39,"config_digital_out oid=%c pin=%u value=%c default_value=%c max_duration=%u":13,"config_endstop oid=%c pin=%c pull_up=%c":24,"config_stepper oid=%c step_pin=%c dir_pin=%c invert_step=%c step_pulse_ticks=%u":18,"config_tmcuart oid=%c rx_pin=%u pull_up=%c tx_pin=%u bit_time=%u":37,"config_trsync oid=%c":27,"debug_nop":12,"debug_ping data=%*s":11,"debug_read order=%c addr=%u":9,"debug_write order=%c addr=%u val=%u":10,"emergency_stop":7,"endstop_home oid=%c clock=%u sample_ticks=%u sample_count=%c rest_ticks=%u pin_value=%c trsync_oid=%c trigger_reason=%c":25,"endstop_query_state oid=%c":26,"finalize_config crc=%u":4,"get_clock":5,"get_config":3,"get_uptime":6,"identify offset=%u count=%c":1,"query_analog_in oid=%c clock=%u sample_ticks=%u sample_count=%c rest_ticks=%u min_value=%hu max_value=%hu range_check_count=%c":32,"query_counter oid=%c clock=%u poll_ticks=%u sample_ticks=%u":40,"queue_digital_out oid=%c clock=%u on_ticks=%u":15,"queue_step oid=%c interval=%u count=%hu add=%hi":19,"reset":41,"reset_step_clock oid=%c clock=%u":21,"set_digital_out pin=%u value=%c":17,"set_digital_out_pwm_cycle oid=%c cycle_ticks=%u":14,"set_next_step_dir oid=%c dir=%c":20,"stepper_get_position oid=%c":22,"stepper_stop_on_trigger oid=%c trsync_oid=%c":23,"tmcuart_send oid=%c write=%*s read=%c":38,"trsync_set_timeout oid=%c clock=%u":29,"trsync_start oid=%c report_clock=%u report_ticks=%u expire_reason=%c":28,"trsync_trigger oid=%c reason=%c":30,"update_digital_out oid=%c value=%c":16},"config":{"ADC_MAX":4095,"CLOCK_FREQ":600000000,"RECEIVE_WINDOW":192,"STATS_SUMSQ_BASE":256,"STEPPER_STEP_BOTH_EDGE":1,"TRANSMIT_WINDOW":192},"enumerations":{"pin":{"PB0":[32,16],"PC0":[64,8],"PD0":[96,23],"PE0":[128,18],"PF0":[160,7],"PG0":[192,19]},"static_string_id":{"ADC out of range":26,"Already finalized":12,"Can not set soft pwm cycle ticks while updates pending":20,"Can't add signal that is already active":25,"Can't assign oid":14,"Can't reset time when stepper active":24,"Command parser error":5,"Command request":17,"Invalid buttons retransmit count":29,"Invalid command":7,"Invalid count parameter":23,"Invalid move request size":11,"Invalid oid type":13,"Max of 8 buttons":27,"Message encode error":6,"Missed scheduling of next digital out event":18,"Move queue overflow":10,"Not a valid ADC pin":31,"Rescheduled timer in the past":32,"Scheduled digital out event will exceed max_duration":19,"Set button past maximum button count":28,"Shutdown cleared when not shutdown":4,"Stepper too far in past":22,"Timer too close":3,"alloc_chunk failed":8,"alloc_chunks failed":9,"config_reset only available when shutdown":16,"oids already allocated":15,"sentinel timer called":2,"tmcuart data too large":30,"update_digital_out not valid with active queue":21}},"kconfig":"CONFIG_LOW_LEVEL_OPTIONS=y\nCONFIG_MACH_HIFI4=y\n# CONFIG_WANT_SOFTWARE_SPI is not set\n# CONFIG_WANT_SOFTWARE_I2C is not set\n# CONFIG_WANT_HARD_PWM is not set\n# CONFIG_WANT_NEOPIXEL is not set\n# CONFIG_WANT_ST7920 is not set\n# CONFIG_WANT_HD44780 is not set\n# CONFIG_WANT_HX71X is not set\n# CONFIG_WANT_HX711S is not set\n# CONFIG_WANT_CS1237 is not set\n# CONFIG_WANT_GPIO_SPI is not set\n","license":"GNU GPLv3","responses":{"analog_in_state oid=%c next_clock=%u value=%hu":54,"buttons_state oid=%c ack_count=%c state=%*s":55,"clock clock=%u":46,"config is_config=%c crc=%u is_shutdown=%c move_count=%hu":45,"counter_state oid=%c next_clock=%u count=%u count_clock=%u":57,"debug_result val=%u":49,"endstop_state oid=%c homing=%c next_clock=%u pin_value=%c":52,"identify_response offset=%u data=%.*s":0,"is_shutdown static_string_id=%hu":43,"pong data=%*s":50,"shutdown clock=%u static_string_id=%hu":42,"starting":44,"stats count=%u sum=%u sumsq=%u":48,"stepper_position oid=%c pos=%i":51,"tmcuart_response oid=%c read=%*s":56,"trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u":53,"uptime high=%u clock=%u":47},"version":"Release - test-20261031_014248-PIGSTATION"}
 \ No newline at end of file

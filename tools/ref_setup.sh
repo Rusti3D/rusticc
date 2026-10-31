@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds the Rusticc parity reference in WSL: ~/rk/cosmos_ref = Kalico
-# 5b59427 + COSMOS's patches (make_ref.sh) + kaliru's serialqueue trace
+# 550d21fb + COSMOS's patches (make_ref.sh) + kaliru's serialqueue trace
 # (tools/ref_trace.patch), with its c_helper built for ~/rk/venv315.
 # Safe to rerun (rebuilds from scratch).
 set -e
@@ -21,7 +21,7 @@ echo "Release - test" > klippy/.version
 ~/rk/venv315/bin/python -m compileall -q --invalidation-mode checked-hash -d /usr/share/klipper/klippy klippy > /dev/null 2>&1 || true
 # the CC1 bed MCU's data dictionary (COSMOS config.bed: hx711s), for the
 # cases/ that use it
-P="/mnt/d/Carbon Centauri/cosmos/meta-opencentauri/recipes-apps/klipper/files"
+P="$(cd "$(dirname "$0")/.." && pwd)/cosmos/meta-opencentauri/recipes-apps/klipper/files"
 FW=$(mktemp -d)
 cp -r "$REF/." "$FW"
 cp "$P/centauri-carbon-1/config.bed" "$FW/.config"

@@ -28,10 +28,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  7 files changed, 411 insertions(+), 79 deletions(-)
 
 diff --git a/src/extras/gcode_macro.rs b/src/extras/gcode_macro.rs
-index 18254b2..a34fdfb 100644
+index 6f6302e..d4bbaa7 100644
 --- a/src/extras/gcode_macro.rs
 +++ b/src/extras/gcode_macro.rs
-@@ -439,14 +439,16 @@ impl GCodeMacro {
+@@ -443,14 +443,16 @@ impl GCodeMacro {
          let prefix = "variable_";
          for option in config.get_prefix_options(prefix)? {
              let text = config.get(&option, Dflt::Required)?;
@@ -87,7 +87,7 @@ index 73ae67f..45cb3e8 100644
  /// ported yet
  pub static KINEMATICS: &[(&str, Option<LoadKinematics>)] = &[
 diff --git a/src/printer.rs b/src/printer.rs
-index 8396138..02ac0fc 100644
+index 5686870..3f04ae7 100644
 --- a/src/printer.rs
 +++ b/src/printer.rs
 @@ -26,7 +26,8 @@ use std::any::Any;
@@ -492,10 +492,10 @@ index 2376075..08595d4 100644
      }
  }
 diff --git a/src/toolhead.rs b/src/toolhead.rs
-index f749fb0..fe5081c 100644
+index 4e88e50..2dc1f30 100644
 --- a/src/toolhead.rs
 +++ b/src/toolhead.rs
-@@ -400,7 +400,11 @@ impl ToolHead {
+@@ -412,7 +412,11 @@ impl ToolHead {
                      // ModuleNotFoundError from importlib (of the first missing
                      // dotted component)
                      let module = format!("klippy.kinematics.{}", kin_name.split('.').next().unwrap_or(""));
@@ -509,7 +509,7 @@ index f749fb0..fe5081c 100644
                      logging::exception_err(&msg, &cause);
                      return Err(KError::config(msg).with_context(cause));
 diff --git a/src/util.rs b/src/util.rs
-index f552679..1b97143 100644
+index 5a20f81..1b97143 100644
 --- a/src/util.rs
 +++ b/src/util.rs
 @@ -4,10 +4,10 @@
@@ -531,8 +531,8 @@ index f552679..1b97143 100644
  use std::ffi::CString;
  use std::os::fd::RawFd;
  
--/// `git describe` of the Kalico commit this port tracks (5b59427)
--pub const KALICO_VERSION: &str = "v2026.10.00-155-g5b594279";
+-/// `git describe` of the Kalico commit this port tracks (550d21fb)
+-pub const KALICO_VERSION: &str = "v2026.10.00-176-g550d21fb";
 -
  // Return the SIGINT interrupt handler back to the OS default
  pub fn fix_sigint() {

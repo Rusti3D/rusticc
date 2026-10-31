@@ -41,6 +41,8 @@ case "$1" in
         [ -d "/var/www/$WEB_UI" ] || WEB_UI=mainsail
         ln -sf "/var/www/$WEB_UI/" /etc/webui
 
+        addons init || exit $?
+
         start-stop-daemon -S -b -m -p $PIDFILE \
             -x $MOONRAKER_EXEC -- $MOONRAKER_ARGS
         ;;

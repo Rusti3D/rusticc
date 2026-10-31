@@ -17,17 +17,17 @@ against COSMOS's python.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- src/extras/load_cell/hx711s.rs | 283 +++++++++++++++++++++++++++++++++
+ src/extras/load_cell/hx711s.rs | 281 +++++++++++++++++++++++++++++++++
  src/extras/load_cell/mod.rs    |  14 +-
- 2 files changed, 294 insertions(+), 3 deletions(-)
+ 2 files changed, 292 insertions(+), 3 deletions(-)
  create mode 100644 src/extras/load_cell/hx711s.rs
 
 diff --git a/src/extras/load_cell/hx711s.rs b/src/extras/load_cell/hx711s.rs
 new file mode 100644
-index 0000000..90a7fa1
+index 0000000..a161270
 --- /dev/null
 +++ b/src/extras/load_cell/hx711s.rs
-@@ -0,0 +1,283 @@
+@@ -0,0 +1,281 @@
 +// Multi-Sensor HX711 and HX717 Support (port of COSMOS's
 +// klippy/extras/load_cell/hx711s.py, 0007-Add-HX711s-load-cell-probe-driver)
 +//
@@ -57,7 +57,7 @@ index 0000000..90a7fa1
 +pub struct HX711SBase {
 +    printer: Rc<Printer>,
 +    name: String,
-+    last_error_count: Cell<i64>,
++    pub error_count: Cell<i64>,
 +    consecutive_fails: Cell<i64>,
 +    sensor_type: &'static str,
 +    sensor_count: usize,
@@ -114,7 +114,7 @@ index 0000000..90a7fa1
 +        let s = Rc::new(HX711SBase {
 +            printer: printer.clone(),
 +            name,
-+            last_error_count: Cell::new(0),
++            error_count: Cell::new(0),
 +            consecutive_fails: Cell::new(0),
 +            sensor_type,
 +            sensor_count,
@@ -163,7 +163,6 @@ index 0000000..90a7fa1
 +    // Start, stop, and process message batches
 +    fn start_measurements(&self) -> KResult<()> {
 +        self.consecutive_fails.set(0);
-+        self.last_error_count.set(0);
 +        // Start bulk reading
 +        let rest_ticks = self.mcu.seconds_to_clock(1.0 / (10.0 * self.sps as f64));
 +        self.query_hx711s_cmd.borrow().as_ref().ok_or_else(no_cmd)?.send(&[Val::Int(self.oid), Val::Int(rest_ticks)], 0, 0)?;
@@ -185,13 +184,10 @@ index 0000000..90a7fa1
 +    }
 +
 +    fn process_batch(&self, _eventtime: f64) -> KResult<PyVal> {
-+        let prev_overflows = self.ffreader.get_last_overflows();
-+        let prev_error_count = self.last_error_count.get();
-+        let samples = self.ffreader.pull_samples()?;
-+        let samples = convert_samples(&self.name, &samples, &self.last_error_count);
-+        let overflows = self.ffreader.get_last_overflows() - prev_overflows;
-+        let errors = self.last_error_count.get() - prev_error_count;
-+        if errors > 0 {
++        let (samples, overflows) = self.ffreader.pull_samples()?;
++        let (samples, batch_errors) = convert_samples(&self.name, &samples);
++        self.error_count.set(self.error_count.get() + batch_errors);
++        if batch_errors > 0 {
 +            logging::error(&format!("{}: Forced sensor restart due to error", self.name));
 +            self.finish_measurements()?;
 +            self.start_measurements()?;
@@ -205,7 +201,7 @@ index 0000000..90a7fa1
 +        } else {
 +            self.consecutive_fails.set(0);
 +        }
-+        Ok(adc_batch(samples, self.last_error_count.get(), self.ffreader.get_last_overflows()))
++        Ok(adc_batch(samples, batch_errors, overflows))
 +    }
 +}
 +
@@ -238,19 +234,21 @@ index 0000000..90a7fa1
 +    }
 +}
 +
-+// Measurement decoding: rows of (time, count, value per chip); an error
-+// sample ends the batch and counts in `last_error_count`
-+fn convert_samples(name: &str, samples: &[(f64, Vec<i64>)], last_error_count: &Cell<i64>) -> Vec<PyVal> {
++// Measurement decoding: rows of (time, count, value per chip) and the batch's
++// errors; an error sample ends the batch. (COSMOS's staticmethod logs with
++// self.name, a NameError there; the sensor's name is logged here)
++pub fn convert_samples(name: &str, samples: &[(f64, Vec<i64>)]) -> (Vec<PyVal>, i64) {
 +    let adc_factor = 1.0 / (1i64 << 23) as f64;
++    let mut batch_errors = 0;
 +    let mut out = vec![];
 +    for (ptime, channel_counts) in samples {
 +        let val = channel_counts[0];
 +        if val == SAMPLE_ERROR_DESYNC {
-+            last_error_count.set(last_error_count.get() + 1);
++            batch_errors += 1;
 +            logging::error(&format!("{}: DESYNC at t={:.3}", name, ptime));
 +            break; // errors latch in the MCU, the rest are duplicates
 +        } else if val == SAMPLE_ERROR_LONG_READ {
-+            last_error_count.set(last_error_count.get() + 1);
++            batch_errors += 1;
 +            logging::error(&format!("{}: READ_TOO_LONG at t={:.3}", name, ptime));
 +            break; // errors latch in the MCU, the rest are duplicates
 +        }
@@ -261,7 +259,7 @@ index 0000000..90a7fa1
 +        }
 +        out.push(PyVal::Tuple(converted));
 +    }
-+    out
++    (out, batch_errors)
 +}
 +
 +pub fn new_hx711s(config: &ConfigWrapper) -> KResult<Rc<dyn BulkAdcSensor>> {
@@ -312,7 +310,7 @@ index 0000000..90a7fa1
 +    }
 +}
 diff --git a/src/extras/load_cell/mod.rs b/src/extras/load_cell/mod.rs
-index d7a7e7c..8f4cfe0 100644
+index 7ddd200..593d280 100644
 --- a/src/extras/load_cell/mod.rs
 +++ b/src/extras/load_cell/mod.rs
 @@ -8,6 +8,7 @@ pub mod ads1220;
@@ -323,7 +321,7 @@ index d7a7e7c..8f4cfe0 100644
  #[allow(clippy::module_inception)]
  pub mod load_cell;
  pub mod load_cell_probe;
-@@ -46,7 +47,7 @@ pub trait BulkAdcSensor {
+@@ -50,7 +51,7 @@ pub trait BulkAdcSensor: std::any::Any {
  pub type SensorFactory = fn(&ConfigWrapper) -> KResult<Rc<dyn BulkAdcSensor>>;
  
  /// the sensors that implement BulkAdcSensor, in python's dict union order
@@ -332,7 +330,7 @@ index d7a7e7c..8f4cfe0 100644
      [
          ("hx711", hx71x::new_hx711),
          ("hx717", hx71x::new_hx717),
-@@ -54,6 +55,9 @@ pub fn sensor_types() -> [(&'static str, SensorFactory); 6] {
+@@ -58,6 +59,9 @@ pub fn sensor_types() -> [(&'static str, SensorFactory); 6] {
          ("ads131m02", ads131m0x::new_ads131m02),
          ("ads131m04", ads131m0x::new_ads131m04),
          ("cs1237", cs1237::new_cs1237),
@@ -342,7 +340,7 @@ index d7a7e7c..8f4cfe0 100644
      ]
  }
  
-@@ -139,10 +143,14 @@ pub(crate) fn adc_batch(data: Vec<PyVal>, errors: i64, overflows: i64) -> PyVal
+@@ -143,10 +147,14 @@ pub(crate) fn adc_batch(data: Vec<PyVal>, errors: i64, overflows: i64) -> PyVal
  
  /// ppins.lookup_pin(pin) of a sensor pin: (its mcu, pin name)
  pub(crate) fn lookup_sensor_pin(config: &ConfigWrapper, option: &str) -> KResult<(Rc<Mcu>, String)> {

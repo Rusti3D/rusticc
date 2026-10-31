@@ -4,7 +4,7 @@
 # packages only Moonraker uses. Kalico's own python dependencies come from
 # kalico. The service runs Moonruster (moonraker-init-d).
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
-RDEPENDS:${PN} = "moonruster curl kalico"
+RDEPENDS:${PN} = "moonruster curl kalico addon"
 
 # Timelapse is disabled until it is finished (docs/TIMELAPSE.md): no
 # [timelapse] section (files/timelapse.conf), so Moonruster's component

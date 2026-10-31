@@ -545,7 +545,7 @@ index e85bd29..261b636 100644
          }
      }
 diff --git a/src/components/update_manager/mod.rs b/src/components/update_manager/mod.rs
-index 57d5a5c..a5a7a5c 100644
+index b3c23e7..d950a5f 100644
 --- a/src/components/update_manager/mod.rs
 +++ b/src/components/update_manager/mod.rs
 @@ -9,6 +9,7 @@ pub mod net_deploy;
@@ -556,7 +556,7 @@ index 57d5a5c..a5a7a5c 100644
  pub mod system_deploy;
  
  use crate::common::*;
-@@ -336,6 +337,7 @@ fn get_deploy(
+@@ -349,6 +350,7 @@ fn get_deploy(
          }
          Some(AppType::GitRepo) => Rc::new(git_deploy::GitDeploy::new(cfg, cmd_helper)?),
          Some(AppType::Python) => Rc::new(python_deploy::PythonDeploy::new(cfg, cmd_helper)?),

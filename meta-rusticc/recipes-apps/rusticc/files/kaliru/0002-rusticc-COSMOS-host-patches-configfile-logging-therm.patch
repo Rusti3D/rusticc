@@ -27,11 +27,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  src/extras/resonance_tester.rs    |   9 +-
  src/extras/shaper_calibrate.rs    |  10 ++-
  src/extras/thermistor.rs          |  80 +++++++++++++++---
+ src/plugins/impls/generated.rs    |   3 +-
+ src/plugins/impls/sensors.rs      |  17 ++--
  src/queuelogger.rs                | 131 +++++++++++++++++++++++++++---
- 7 files changed, 225 insertions(+), 56 deletions(-)
+ 9 files changed, 238 insertions(+), 63 deletions(-)
 
 diff --git a/src/configfile.rs b/src/configfile.rs
-index f607ef3..ae8041a 100644
+index 2d5d8d8..b516d7c 100644
 --- a/src/configfile.rs
 +++ b/src/configfile.rs
 @@ -870,8 +870,19 @@ impl PrinterConfig {
@@ -108,10 +110,10 @@ index f607ef3..ae8041a 100644
          self.write_backup(&cfgname, &data)?;
          Ok(true)
 diff --git a/src/extras/load_cell/load_cell.rs b/src/extras/load_cell/load_cell.rs
-index 0c71a02..a1b1d19 100644
+index 60a2ca7..08518b7 100644
 --- a/src/extras/load_cell/load_cell.rs
 +++ b/src/extras/load_cell/load_cell.rs
-@@ -463,9 +463,10 @@ impl LoadCellGuidedCalibrationHelper {
+@@ -476,9 +476,10 @@ impl LoadCellGuidedCalibrationHelper {
                  "ERROR: Tare and Calibration readings are the same!\nCheck wiring and validate sensor with READ_LOAD_CELL command.",
              ));
          }
@@ -125,10 +127,10 @@ index 0c71a02..a1b1d19 100644
          }
          // only set _counts_per_gram after all errors are raised
 diff --git a/src/extras/probe.rs b/src/extras/probe.rs
-index 82b66d3..ef77ac9 100644
+index 21f3b1e..4d792f9 100644
 --- a/src/extras/probe.rs
 +++ b/src/extras/probe.rs
-@@ -918,7 +918,8 @@ impl PrinterProbe {
+@@ -937,7 +937,8 @@ impl PrinterProbe {
              let toolhead = self.toolhead()?;
              toolhead.get_last_move_time()?;
              let mut toolhead_pos = toolhead.get_position();
@@ -139,7 +141,7 @@ index 82b66d3..ef77ac9 100644
          }
          Ok(())
 diff --git a/src/extras/resonance_tester.rs b/src/extras/resonance_tester.rs
-index 9122c69..fde3be8 100644
+index 4d4539f..0ea7572 100644
 --- a/src/extras/resonance_tester.rs
 +++ b/src/extras/resonance_tester.rs
 @@ -658,6 +658,13 @@ impl ResonanceTester {
@@ -166,7 +168,7 @@ index 9122c69..fde3be8 100644
                  &format!(
                      "Recommended shaper_type_{} = {}, shaper_freq_{} = {:.1} Hz",
 diff --git a/src/extras/shaper_calibrate.rs b/src/extras/shaper_calibrate.rs
-index df1be20..f0b8db1 100644
+index 37c401a..7162d37 100644
 --- a/src/extras/shaper_calibrate.rs
 +++ b/src/extras/shaper_calibrate.rs
 @@ -415,12 +415,13 @@ impl ShaperCalibrate {
@@ -199,7 +201,7 @@ index df1be20..f0b8db1 100644
              }
              let data = calibration_data.clone();
 diff --git a/src/extras/thermistor.rs b/src/extras/thermistor.rs
-index fbb0867..4d0e449 100644
+index cd13868..18aec5a 100644
 --- a/src/extras/thermistor.rs
 +++ b/src/extras/thermistor.rs
 @@ -1,4 +1,7 @@
@@ -212,12 +214,12 @@ index fbb0867..4d0e449 100644
  //
 @@ -27,14 +30,15 @@ fn py_log(x: f64) -> KResult<f64> {
  pub struct Thermistor {
-     pullup: f64,
-     inline_resistor: f64,
-+    pulldown_resistor: f64,
-     c1: Cell<f64>,
-     c2: Cell<f64>,
-     c3: Cell<f64>,
+     pub pullup: f64,
+     pub inline_resistor: f64,
++    pub pulldown_resistor: f64,
+     pub c1: Cell<f64>,
+     pub c2: Cell<f64>,
+     pub c3: Cell<f64>,
  }
  
  impl Thermistor {
@@ -319,8 +321,8 @@ index fbb0867..4d0e449 100644
 +    Ok(ThermistorParams::Points { t1, r1, t2, r2, t3, r3, pulldown_resistor })
  }
  
- pub fn load_config_prefix(config: &ConfigWrapper) -> KResult<PObj> {
-@@ -154,3 +182,31 @@ pub fn load_config_prefix(config: &ConfigWrapper) -> KResult<PObj> {
+ // A custom [thermistor] section
+@@ -169,3 +197,31 @@ pub fn load_config_prefix(config: &ConfigWrapper) -> KResult<PObj> {
      pheaters.add_sensor_factory(&name, Rc::new(move |config: &ConfigWrapper| printer_thermistor(config, &params)));
      Ok(none_object())
  }
@@ -352,6 +354,60 @@ index fbb0867..4d0e449 100644
 +        assert_eq!(adcs, [1.0, 0.9862132098380977, 0.9551098376313276, 0.5974372247265058, 0.13676140111700302, 0.03560487233171683]);
 +    }
 +}
+diff --git a/src/plugins/impls/generated.rs b/src/plugins/impls/generated.rs
+index d7fa40a..3a32994 100644
+--- a/src/plugins/impls/generated.rs
++++ b/src/plugins/impls/generated.rs
+@@ -9036,7 +9036,8 @@ pub fn register(r: &mut Registry) {
+     r.ctor("klippy.extras.thermistor.Thermistor.__init__", |a| {
+         let p0: f64 = FromPy::from_py(a.arg(0))?;
+         let p1: f64 = FromPy::from_py(a.arg(1))?;
+-        let o: Rc<dyn Any> = Rc::new(crate::extras::thermistor::Thermistor::new(p0, p1));
++        let p2: f64 = FromPy::from_py(a.arg(2))?;
++        let o: Rc<dyn Any> = Rc::new(crate::extras::thermistor::Thermistor::new(p0, p1, p2));
+         Ok(o)
+     });
+     r.method("klippy.extras.thermistor.Thermistor.setup_coefficients", |a| {
+diff --git a/src/plugins/impls/sensors.rs b/src/plugins/impls/sensors.rs
+index e71413c..ac21eec 100644
+--- a/src/plugins/impls/sensors.rs
++++ b/src/plugins/impls/sensors.rs
+@@ -48,13 +48,16 @@ fn li_method(li: Rc<LinearInterpolate>, reverse: bool) -> KResult<PyRef> {
+     }))
+ }
+ 
+-/// PrinterThermistor's params: {"t1", "r1", "beta"} or {"t1".."r3"}
++/// PrinterThermistor's params: {"t1", "r1", "beta"} or {"t1".."r3"}, and
++/// COSMOS's "pulldown_resistor"
+ fn thermistor_params_to_py(p: &ThermistorParams) -> KResult<PyRef> {
+     let d = lookup("builtins", "dict")?.call(&[])?;
+     let items: Vec<(&str, f64)> = match *p {
+-        ThermistorParams::Beta { t1, r1, beta } => vec![("t1", t1), ("r1", r1), ("beta", beta)],
+-        ThermistorParams::Points { t1, r1, t2, r2, t3, r3 } => {
+-            vec![("t1", t1), ("r1", r1), ("t2", t2), ("r2", r2), ("t3", t3), ("r3", r3)]
++        ThermistorParams::Beta { t1, r1, beta, pulldown_resistor } => {
++            vec![("t1", t1), ("r1", r1), ("beta", beta), ("pulldown_resistor", pulldown_resistor)]
++        }
++        ThermistorParams::Points { t1, r1, t2, r2, t3, r3, pulldown_resistor } => {
++            vec![("t1", t1), ("r1", r1), ("t2", t2), ("r2", r2), ("t3", t3), ("r3", r3), ("pulldown_resistor", pulldown_resistor)]
+         }
+     };
+     for (k, v) in items {
+@@ -65,10 +68,12 @@ fn thermistor_params_to_py(p: &ThermistorParams) -> KResult<PyRef> {
+ 
+ fn thermistor_params_from_py(o: &PyRef) -> KResult<ThermistorParams> {
+     let get = |k: &str| -> KResult<f64> { o.call_method("__getitem__", &[&py_str(k)])?.as_f64() };
++    // params.get("pulldown_resistor", 0.0)
++    let pulldown_resistor = o.call_method("get", &[&py_str("pulldown_resistor"), &py_float(0.0)])?.as_f64()?;
+     if o.call_method("__contains__", &[&py_str("beta")])?.is_true()? {
+-        return Ok(ThermistorParams::Beta { t1: get("t1")?, r1: get("r1")?, beta: get("beta")? });
++        return Ok(ThermistorParams::Beta { t1: get("t1")?, r1: get("r1")?, beta: get("beta")?, pulldown_resistor });
+     }
+-    Ok(ThermistorParams::Points { t1: get("t1")?, r1: get("r1")?, t2: get("t2")?, r2: get("r2")?, t3: get("t3")?, r3: get("r3")? })
++    Ok(ThermistorParams::Points { t1: get("t1")?, r1: get("r1")?, t2: get("t2")?, r2: get("r2")?, t3: get("t3")?, r3: get("r3")?, pulldown_resistor })
+ }
+ 
+ pub fn register(r: &mut Registry) {
 diff --git a/src/queuelogger.rs b/src/queuelogger.rs
 index 3e0727d..c8e55f3 100644
 --- a/src/queuelogger.rs

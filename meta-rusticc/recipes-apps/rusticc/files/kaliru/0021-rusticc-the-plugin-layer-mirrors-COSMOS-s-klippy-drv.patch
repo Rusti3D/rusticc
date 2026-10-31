@@ -15,19 +15,20 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
 ---
  src/extras/drv8833.rs                         |   7 +-
- src/plugins/impls/cosmos.rs                   |  20 ++
+ src/extras/thermistor.rs                      |   4 +-
+ src/plugins/impls/cosmos.rs                   |  25 ++
  src/plugins/impls/mod.rs                      |   2 +
- src/plugins/mirror.bin                        | Bin 206990 -> 212864 bytes
+ src/plugins/mirror.bin                        | Bin 227767 -> 233673 bytes
  .../klippy.extras.canvas_filament_sensor.py   | 124 +++++++++
  .../mirror/klippy.extras.canvas_rfid.py       | 104 +++++++
  src/plugins/mirror/klippy.extras.drv8833.py   | 216 +++++++++++++++
- .../mirror/klippy.extras.load_cell.hx711s.py  |  64 +++++
+ .../mirror/klippy.extras.load_cell.hx711s.py  |  65 +++++
  .../mirror/klippy.extras.thermistor.py        |   9 +-
  src/plugins/mirror/klippy.py                  |   2 +-
  src/plugins/mirror/klippy.queuelogger.py      |  18 +-
  src/plugins/mirror_ids.rs                     | 261 +++++++++++++++++-
  tools/gen_mirror.py                           |  20 +-
- 13 files changed, 825 insertions(+), 22 deletions(-)
+ 14 files changed, 833 insertions(+), 24 deletions(-)
  create mode 100644 src/plugins/impls/cosmos.rs
  create mode 100644 src/plugins/mirror/klippy.extras.canvas_filament_sensor.py
  create mode 100644 src/plugins/mirror/klippy.extras.canvas_rfid.py
@@ -59,20 +60,47 @@ index 34e8d1a..d3caf2e 100644
      /// Drv8833Interface.drv8833_set_speed
      pub fn drv8833_set_speed(&self, speed: f64) -> KResult<()> {
          if speed == 0.0 {
+diff --git a/src/extras/thermistor.rs b/src/extras/thermistor.rs
+index 18aec5a..c0c534a 100644
+--- a/src/extras/thermistor.rs
++++ b/src/extras/thermistor.rs
+@@ -78,7 +78,7 @@ impl Thermistor {
+         Ok(())
+     }
+ 
+-    fn remove_pulldown(&self, r: f64) -> f64 {
++    pub fn remove_pulldown(&self, r: f64) -> f64 {
+         if self.pulldown_resistor == 0.0 {
+             return r;
+         }
+@@ -87,7 +87,7 @@ impl Thermistor {
+         r * self.pulldown_resistor / (self.pulldown_resistor - r)
+     }
+ 
+-    fn apply_pulldown(&self, r: f64) -> f64 {
++    pub fn apply_pulldown(&self, r: f64) -> f64 {
+         if self.pulldown_resistor == 0.0 {
+             return r;
+         }
 diff --git a/src/plugins/impls/cosmos.rs b/src/plugins/impls/cosmos.rs
 new file mode 100644
-index 0000000..15b546d
+index 0000000..78fb55b
 --- /dev/null
 +++ b/src/plugins/impls/cosmos.rs
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,25 @@
 +// COSMOS's own klippy modules (Rusticc ports them natively): what python
 +// modules call on them. The python AFC drives the Canvas lane motors through
 +// drv8833.
 +use super::*;
 +use crate::extras::drv8833::PrinterDrv8833;
++use crate::extras::thermistor::Thermistor;
 +use crate::ro_attr;
 +
 +pub fn register(r: &mut Registry) {
++    // thermistor's pulldown_resistor (a resistor in parallel, the CC1's)
++    r.method("klippy.extras.thermistor.Thermistor._remove_pulldown", |a| Ok(py_float(a.this::<Thermistor>()?.remove_pulldown(a.f64(0)?))));
++    r.method("klippy.extras.thermistor.Thermistor._apply_pulldown", |a| Ok(py_float(a.this::<Thermistor>()?.apply_pulldown(a.f64(0)?))));
++    r.attr("klippy.extras.thermistor.Thermistor.pulldown_resistor", |o| Ok(py_float(objects::unwrap_as::<Thermistor>(o)?.pulldown_resistor)), None);
 +    r.method("klippy.extras.drv8833.PrinterDrv8833.drv8833_set_speed", |a| {
 +        a.this::<PrinterDrv8833>()?.drv8833_set_speed(a.f64(0)?)?;
 +        Ok(py_none())
@@ -86,180 +114,181 @@ index 0000000..15b546d
 +    ro_attr!(r, "klippy.extras.drv8833.PrinterDrv8833.name", PrinterDrv8833, |m| m.name.clone());
 +}
 diff --git a/src/plugins/impls/mod.rs b/src/plugins/impls/mod.rs
-index 68eb90f..cc39d8e 100644
+index 30aa3ab..3f6c8b6 100644
 --- a/src/plugins/impls/mod.rs
 +++ b/src/plugins/impls/mod.rs
-@@ -6,6 +6,7 @@ mod accel;
- mod buttons;
+@@ -9,6 +9,7 @@ mod bus;
+ mod chelper;
  mod classes;
  mod configfile;
 +mod cosmos;
+ mod display;
  mod extras_misc;
- mod extras_state;
- mod extruder;
-@@ -39,6 +40,7 @@ pub fn register(r: &mut Registry) {
+ mod extras_more;
+@@ -64,6 +65,7 @@ pub fn register(r: &mut Registry) {
      extras_state::register(r);
      extruder::register(r);
      configfile::register(r);
 +    cosmos::register(r);
+     display::register(r);
      filament_switch_sensor::register(r);
      gcode::register(r);
-     heaters::register(r);
 diff --git a/src/plugins/mirror.bin b/src/plugins/mirror.bin
-index 4c15386e4fc6c34a8cddb16425bdba03c68a8cf5..c80a6de108e3ff07723852c9bd2f5365ef6746ae 100644
+index 347e41ff1a4852342b3cfca55a8d66b06ec354f1..2caa5094fdb619c7618010810b87c4182a3353a6 100644
 GIT binary patch
-delta 7451
-zcmV+$9pvJU(F}n941d%B000I6Yiwz7aCw{n006xJ004N}HO;*W!Y~wu;XROhIN)G)
+delta 7500
+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
-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
-Z5)RO=MwGfNC`I@`kBP7Lw^axOIUuG)f5-p;
+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
+W)reA;1*Hi82a)Kn{I?lc1D+ukw2*%Q
 
-delta 1582
-zcmV+}2GRL|{|t`N41dr7000I6Yiwz7aCw#h006uI004N}HI2Ip!axuJ`-A(31&c(B
+delta 1583
+zcmV+~2GIG*p$@n64S&!8000I6Yiwz7aCw#h006uI004N}HI2Ip!axuJ`-A(31&c(B
 z*b5dGR-)t&meXv)agROLO>uwkNwl3Am>mQcy{u5;y7&yyRgx1VFTw&m!>#ETLx{eV
 z3jIQv#3@bitf0*CeQXG~ekgTsjZcL|0fRNOaDt(T&q@M6aVxOKn#(xi<8r^k8M<xJ
-zeX%u&3#n5T#O5#ziKjKvpZ18^B|>bY5AXv%wXv{WaI+G8(nzy_%~7HO9hZ?}0U5VK
-za{&+0fByjh08s@10C?K1l;3OHFc8Pz4f!8L_YfB{FOHjfEA(NMK9rVq&}^@VqMS1=
+zeX%u&3#n5T#O5#ziKjKvpZ18^B|>bY5AXv%wXv{gbh99UX;rf^-V(I|9hVV`0U5W&
+zmH|ERfByjh08s@10C?K1l;3OHFc8Pz4f!8L_YfB{FOHjfEA(NMK9rVq&}^@VqMS1=
 zvSehLHUIri{t?F>33-@<Fx>Z}@10Mld|*4Sq^($?s;$&a@jco*mP>1mWhP_KBn!iK
 zN*2XF!gptR8M$9*b6Gk<!YyjF+~J0;_skiif67l3g2o{#_Scg@=7q72!EO>vg6GGV
 zpHJUl^$HJ<FK<sj-q=0+xJZ*IUV2$5UY2ZiND#s<dR_lU;jZr{0iy??DY;DnKn5#Y
@@ -269,27 +298,27 @@ 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
-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
+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
 
 diff --git a/src/plugins/mirror/klippy.extras.canvas_filament_sensor.py b/src/plugins/mirror/klippy.extras.canvas_filament_sensor.py
 new file mode 100644
-index 0000000..fe43214
+index 0000000..ccaa6ab
 --- /dev/null
 +++ b/src/plugins/mirror/klippy.extras.canvas_filament_sensor.py
 @@ -0,0 +1,124 @@
@@ -311,115 +340,115 @@ index 0000000..fe43214
 +PINS = ('filament', 'encoder')
 +
 +def crc8(data, crc=CRC8_INIT):
-+    return _k.fcall(7489, data, crc)
++    return _k.fcall(7512, data, crc)
 +
 +def crc16(data, crc=CRC16_INIT):
-+    return _k.fcall(7490, data, crc)
++    return _k.fcall(7513, data, crc)
 +
 +def build_frame(payload):
-+    return _k.fcall(7491, payload)
++    return _k.fcall(7514, payload)
 +
 +class FrameParser(_k.Object):
 +    __kaliru_mirror__ = True
 +    def __init__(self):
-+        _k.new(self, 7492)
++        _k.new(self, 7515)
 +    def feed(self, data):
-+        return _k.call(self, 7493, data)
-+    buf = _k.Attr(7494, 'buf')
-+    errors = _k.Attr(7495, 'errors')
++        return _k.call(self, 7516, data)
++    buf = _k.Attr(7517, 'buf')
++    errors = _k.Attr(7518, 'errors')
 +
 +class _Command(_k.Object):
 +    __kaliru_mirror__ = True
 +    def __init__(self, handler):
-+        _k.new(self, 7496, handler)
++        _k.new(self, 7519, handler)
 +    def send(self, data=(), minclock=0, reqclock=0):
-+        return _k.call(self, 7497, data, minclock, reqclock)
-+    handler = _k.Attr(7498, 'handler')
++        return _k.call(self, 7520, data, minclock, reqclock)
++    handler = _k.Attr(7521, 'handler')
 +
 +class CanvasFilamentSensor(_k.Object):
 +    __kaliru_mirror__ = True
 +    def __init__(self, config):
-+        _k.new(self, 7499, config)
++        _k.new(self, 7522, config)
 +    def _connect(self):
-+        return _k.call(self, 7500)
++        return _k.call(self, 7523)
 +    def _handle_ready(self):
-+        return _k.call(self, 7501)
++        return _k.call(self, 7524)
 +    def _handle_disconnect(self):
-+        return _k.call(self, 7502)
++        return _k.call(self, 7525)
 +    def setup_pin(self, pin_type, pin_params):
-+        return _k.call(self, 7503, pin_type, pin_params)
++        return _k.call(self, 7526, pin_type, pin_params)
 +    def register_config_callback(self, cb):
-+        return _k.call(self, 7504, cb)
++        return _k.call(self, 7527, cb)
 +    def create_oid(self):
-+        return _k.call(self, 7505)
++        return _k.call(self, 7528)
 +    def add_config_cmd(self, cmd, is_init=False, on_restart=False):
-+        return _k.call(self, 7506, cmd, is_init, on_restart)
++        return _k.call(self, 7529, cmd, is_init, on_restart)
 +    def alloc_command_queue(self):
-+        return _k.call(self, 7507)
++        return _k.call(self, 7530)
 +    def lookup_command(self, msgformat, cq=None):
-+        return _k.call(self, 7508, msgformat, cq)
++        return _k.call(self, 7531, msgformat, cq)
 +    def get_query_slot(self, oid):
-+        return _k.call(self, 7509, oid)
++        return _k.call(self, 7532, oid)
 +    def seconds_to_clock(self, time):
-+        return _k.call(self, 7510, time)
++        return _k.call(self, 7533, time)
 +    def register_response(self, cb, msg, oid=None):
-+        return _k.call(self, 7511, cb, msg, oid)
++        return _k.call(self, 7534, cb, msg, oid)
 +    def _handle_ack(self, data):
-+        return _k.call(self, 7512, data)
++        return _k.call(self, 7535, data)
 +    def _open(self):
-+        return _k.call(self, 7513)
++        return _k.call(self, 7536)
 +    def _close(self):
-+        return _k.call(self, 7514)
++        return _k.call(self, 7537)
 +    def _io_error(self, eventtime, err):
-+        return _k.call(self, 7515, eventtime, err)
++        return _k.call(self, 7538, eventtime, err)
 +    def _poll_event(self, eventtime):
-+        return _k.call(self, 7516, eventtime)
++        return _k.call(self, 7539, eventtime)
 +    def _handle_read(self, eventtime):
-+        return _k.call(self, 7517, eventtime)
++        return _k.call(self, 7540, eventtime)
 +    def _process_payload(self, eventtime, payload):
-+        return _k.call(self, 7518, eventtime, payload)
++        return _k.call(self, 7541, eventtime, payload)
 +    def _set_disconnected(self, eventtime):
-+        return _k.call(self, 7519, eventtime)
++        return _k.call(self, 7542, eventtime)
 +    def _update_pins(self, eventtime, present, edges):
-+        return _k.call(self, 7520, eventtime, present, edges)
++        return _k.call(self, 7543, eventtime, present, edges)
 +    def get_status(self, eventtime):
-+        return _k.call(self, 7521, eventtime)
-+    awaiting_reply = _k.Attr(7522, 'awaiting_reply')
-+    baud = _k.Attr(7523, 'baud')
-+    chip_name = _k.Attr(7524, 'chip_name')
-+    config_callbacks = _k.Attr(7525, 'config_callbacks')
-+    connected = _k.Attr(7526, 'connected')
-+    device_id = _k.Attr(7527, 'device_id')
-+    edges = _k.Attr(7528, 'edges')
-+    fd_handle = _k.Attr(7529, 'fd_handle')
-+    groups = _k.Attr(7530, 'groups')
-+    last_edges = _k.Attr(7531, 'last_edges')
-+    levels = _k.Attr(7532, 'levels')
-+    max_missed = _k.Attr(7533, 'max_missed')
-+    missed = _k.Attr(7534, 'missed')
-+    next_oid = _k.Attr(7535, 'next_oid')
-+    open_error = _k.Attr(7536, 'open_error')
-+    parser = _k.Attr(7537, 'parser')
-+    pin_error = _k.Attr(7538, 'pin_error')
-+    poll_interval = _k.Attr(7539, 'poll_interval')
-+    poll_timer = _k.Attr(7540, 'poll_timer')
-+    present = _k.Attr(7541, 'present')
-+    printer = _k.Attr(7542, 'printer')
-+    reactor = _k.Attr(7543, 'reactor')
-+    runout_on_disconnect = _k.Attr(7544, 'runout_on_disconnect')
-+    ser = _k.Attr(7545, 'ser')
-+    serial_port = _k.Attr(7546, 'serial_port')
-+    version = _k.Attr(7547, 'version')
-+    want_version = _k.Attr(7548, 'want_version')
++        return _k.call(self, 7544, eventtime)
++    awaiting_reply = _k.Attr(7545, 'awaiting_reply')
++    baud = _k.Attr(7546, 'baud')
++    chip_name = _k.Attr(7547, 'chip_name')
++    config_callbacks = _k.Attr(7548, 'config_callbacks')
++    connected = _k.Attr(7549, 'connected')
++    device_id = _k.Attr(7550, 'device_id')
++    edges = _k.Attr(7551, 'edges')
++    fd_handle = _k.Attr(7552, 'fd_handle')
++    groups = _k.Attr(7553, 'groups')
++    last_edges = _k.Attr(7554, 'last_edges')
++    levels = _k.Attr(7555, 'levels')
++    max_missed = _k.Attr(7556, 'max_missed')
++    missed = _k.Attr(7557, 'missed')
++    next_oid = _k.Attr(7558, 'next_oid')
++    open_error = _k.Attr(7559, 'open_error')
++    parser = _k.Attr(7560, 'parser')
++    pin_error = _k.Attr(7561, 'pin_error')
++    poll_interval = _k.Attr(7562, 'poll_interval')
++    poll_timer = _k.Attr(7563, 'poll_timer')
++    present = _k.Attr(7564, 'present')
++    printer = _k.Attr(7565, 'printer')
++    reactor = _k.Attr(7566, 'reactor')
++    runout_on_disconnect = _k.Attr(7567, 'runout_on_disconnect')
++    ser = _k.Attr(7568, 'ser')
++    serial_port = _k.Attr(7569, 'serial_port')
++    version = _k.Attr(7570, 'version')
++    want_version = _k.Attr(7571, 'want_version')
 +
 +def load_config(config):
-+    return _k.fcall(7549, config)
++    return _k.fcall(7572, config)
 +
 +
 +__getattr__ = _k.module_getattr(__name__)
 diff --git a/src/plugins/mirror/klippy.extras.canvas_rfid.py b/src/plugins/mirror/klippy.extras.canvas_rfid.py
 new file mode 100644
-index 0000000..e437d7b
+index 0000000..3374850
 --- /dev/null
 +++ b/src/plugins/mirror/klippy.extras.canvas_rfid.py
 @@ -0,0 +1,104 @@
@@ -441,95 +470,95 @@ index 0000000..e437d7b
 +PROCESSORS = {'elegoo': ('tag.elegoo.processor', 'ElegooTagProcessor'), 'tigertag': ('tag.tigertag.processor', 'TigerTagProcessor'), 'openspool': ('tag.openspool.processor', 'OpenspoolTagProcessor'), 'opentag3d': ('tag.opentag3d.processor', 'OpenTag3DTagProcessor'), 'spoolease': ('tag.spoolease.processor', 'SpooleaseTagProcessor'), 'anycubic': ('tag.anycubic.processor', 'AnycubicTagProcessor')}
 +
 +def xor8(data):
-+    return _k.fcall(7550, data)
++    return _k.fcall(7573, data)
 +
 +def build_frame(cls, cmd, data=b"", seq=0):
-+    return _k.fcall(7551, cls, cmd, data, seq)
++    return _k.fcall(7574, cls, cmd, data, seq)
 +
 +def parse_reply(frame, rx):
-+    return _k.fcall(7552, frame, rx)
++    return _k.fcall(7575, frame, rx)
 +
 +def tag_last_page(head):
-+    return _k.fcall(7553, head)
++    return _k.fcall(7576, head)
 +
 +class OpenRFID(_k.Object):
 +    __kaliru_mirror__ = True
 +    def __init__(self, path, names):
-+        _k.new(self, 7554, path, names)
++        _k.new(self, 7577, path, names)
 +    def identify(self, uid, data):
-+        return _k.call(self, 7555, uid, data)
-+    ScanResult = _k.Attr(7556, 'ScanResult')
-+    processors = _k.Attr(7557, 'processors')
-+    ultralight = _k.Attr(7558, 'ultralight')
++        return _k.call(self, 7578, uid, data)
++    ScanResult = _k.Attr(7579, 'ScanResult')
++    processors = _k.Attr(7580, 'processors')
++    ultralight = _k.Attr(7581, 'ultralight')
 +
 +class CanvasRFID(_k.Object):
 +    __kaliru_mirror__ = True
 +    def __init__(self, config):
-+        _k.new(self, 7559, config)
++        _k.new(self, 7582, config)
 +    def _handle_ready(self):
-+        return _k.call(self, 7560)
++        return _k.call(self, 7583)
 +    def _transact(self, cls, cmd, data=b"", rxlen=24):
-+        return _k.call(self, 7561, cls, cmd, data, rxlen)
++        return _k.call(self, 7584, cls, cmd, data, rxlen)
 +    def _read_pages(self, start, end):
-+        return _k.call(self, 7562, start, end)
++        return _k.call(self, 7585, start, end)
 +    def _read_tag(self):
-+        return _k.call(self, 7563)
++        return _k.call(self, 7586)
 +    def _init_module(self):
-+        return _k.call(self, 7564)
++        return _k.call(self, 7587)
 +    def _read_module_info(self):
-+        return _k.call(self, 7565)
++        return _k.call(self, 7588)
 +    def _poll_event(self, eventtime):
-+        return _k.call(self, 7566, eventtime)
++        return _k.call(self, 7589, eventtime)
 +    def _describe(self):
-+        return _k.call(self, 7567)
++        return _k.call(self, 7590)
 +    def _respond(self, msg):
-+        return _k.call(self, 7568, msg)
++        return _k.call(self, 7591, msg)
 +    def _run_tag_gcode(self, eventtime):
-+        return _k.call(self, 7569, eventtime)
++        return _k.call(self, 7592, eventtime)
 +    def get_status(self, eventtime):
-+        return _k.call(self, 7570, eventtime)
++        return _k.call(self, 7593, eventtime)
 +    cmd_QUERY_CANVAS_RFID_help = 'Report the spool tag on a Canvas RFID reader'
 +    def cmd_QUERY_CANVAS_RFID(self, gcmd):
-+        return _k.call(self, 7571, gcmd)
++        return _k.call(self, 7594, gcmd)
 +    cmd_CANVAS_RFID_DUMP_help = 'Dump the pages of the tag on a Canvas reader'
 +    def cmd_CANVAS_RFID_DUMP(self, gcmd):
-+        return _k.call(self, 7572, gcmd)
-+    errors = _k.Attr(7573, 'errors')
-+    failed_uid = _k.Attr(7574, 'failed_uid')
-+    failed_until = _k.Attr(7575, 'failed_until')
-+    filament = _k.Attr(7576, 'filament')
-+    gcode_macro = _k.Attr(7577, 'gcode_macro')
-+    i2c = _k.Attr(7578, 'i2c')
-+    init_module = _k.Attr(7579, 'init_module')
-+    initialized = _k.Attr(7580, 'initialized')
-+    lock = _k.Attr(7581, 'lock')
-+    max_pages = _k.Attr(7582, 'max_pages')
-+    name = _k.Attr(7583, 'name')
-+    openrfid = _k.Attr(7584, 'openrfid')
-+    poll_interval = _k.Attr(7585, 'poll_interval')
-+    poll_timer = _k.Attr(7586, 'poll_timer')
-+    poll_while_printing = _k.Attr(7587, 'poll_while_printing')
-+    print_stats = _k.Attr(7588, 'print_stats')
-+    printer = _k.Attr(7589, 'printer')
-+    reactor = _k.Attr(7590, 'reactor')
-+    reply_delay = _k.Attr(7591, 'reply_delay')
-+    retries = _k.Attr(7592, 'retries')
-+    scan_id = _k.Attr(7593, 'scan_id')
-+    scan_time = _k.Attr(7594, 'scan_time')
-+    seq = _k.Attr(7595, 'seq')
-+    tag_gcode = _k.Attr(7596, 'tag_gcode')
-+    uid = _k.Attr(7597, 'uid')
-+    use_seq = _k.Attr(7598, 'use_seq')
-+    version = _k.Attr(7599, 'version')
++        return _k.call(self, 7595, gcmd)
++    errors = _k.Attr(7596, 'errors')
++    failed_uid = _k.Attr(7597, 'failed_uid')
++    failed_until = _k.Attr(7598, 'failed_until')
++    filament = _k.Attr(7599, 'filament')
++    gcode_macro = _k.Attr(7600, 'gcode_macro')
++    i2c = _k.Attr(7601, 'i2c')
++    init_module = _k.Attr(7602, 'init_module')
++    initialized = _k.Attr(7603, 'initialized')
++    lock = _k.Attr(7604, 'lock')
++    max_pages = _k.Attr(7605, 'max_pages')
++    name = _k.Attr(7606, 'name')
++    openrfid = _k.Attr(7607, 'openrfid')
++    poll_interval = _k.Attr(7608, 'poll_interval')
++    poll_timer = _k.Attr(7609, 'poll_timer')
++    poll_while_printing = _k.Attr(7610, 'poll_while_printing')
++    print_stats = _k.Attr(7611, 'print_stats')
++    printer = _k.Attr(7612, 'printer')
++    reactor = _k.Attr(7613, 'reactor')
++    reply_delay = _k.Attr(7614, 'reply_delay')
++    retries = _k.Attr(7615, 'retries')
++    scan_id = _k.Attr(7616, 'scan_id')
++    scan_time = _k.Attr(7617, 'scan_time')
++    seq = _k.Attr(7618, 'seq')
++    tag_gcode = _k.Attr(7619, 'tag_gcode')
++    uid = _k.Attr(7620, 'uid')
++    use_seq = _k.Attr(7621, 'use_seq')
++    version = _k.Attr(7622, 'version')
 +
 +def load_config_prefix(config):
-+    return _k.fcall(7600, config)
++    return _k.fcall(7623, config)
 +
 +
 +__getattr__ = _k.module_getattr(__name__)
 diff --git a/src/plugins/mirror/klippy.extras.drv8833.py b/src/plugins/mirror/klippy.extras.drv8833.py
 new file mode 100644
-index 0000000..5ea9934
+index 0000000..14e8d79
 --- /dev/null
 +++ b/src/plugins/mirror/klippy.extras.drv8833.py
 @@ -0,0 +1,216 @@
@@ -561,101 +590,101 @@ index 0000000..5ea9934
 +AUTOTUNE_TIMEOUT = 45.0
 +
 +def _clamp(value, min_value, max_value):
-+    return _k.fcall(7601, value, min_value, max_value)
++    return _k.fcall(7624, value, min_value, max_value)
 +
 +class Drv8833Interface(_k.Object):
 +    __kaliru_mirror__ = True
 +    def drv8833_set_speed(self, speed):
-+        return _k.call(self, 7602, speed)
++        return _k.call(self, 7625, speed)
 +    def drv8833_move(self, speed, distance):
-+        return _k.call(self, 7603, speed, distance)
++        return _k.call(self, 7626, speed, distance)
 +
 +class MCUDrv8833Controller(_k.Object):
 +    __kaliru_mirror__ = True
 +    def __init__(self, config, motor_fwd_params, motor_rwd_params, hall_params):
-+        _k.new(self, 7604, config, motor_fwd_params, motor_rwd_params, hall_params)
++        _k.new(self, 7627, config, motor_fwd_params, motor_rwd_params, hall_params)
 +    def _pid_to_mcu(self, value):
-+        return _k.call(self, 7605, value)
++        return _k.call(self, 7628, value)
 +    def _build_config(self):
-+        return _k.call(self, 7606)
++        return _k.call(self, 7629)
 +    def _handle_status(self, params):
-+        return _k.call(self, 7607, params)
++        return _k.call(self, 7630, params)
 +    def start(self, direction, target_speed):
-+        return _k.call(self, 7608, direction, target_speed)
++        return _k.call(self, 7631, direction, target_speed)
 +    def start_move(self, direction, target_speed, stop_ticks):
-+        return _k.call(self, 7609, direction, target_speed, stop_ticks)
++        return _k.call(self, 7632, direction, target_speed, stop_ticks)
 +    def manual_start(self, direction, duty_cycle):
-+        return _k.call(self, 7610, direction, duty_cycle)
++        return _k.call(self, 7633, direction, duty_cycle)
 +    def set_pid(self, kp, ki, kd):
-+        return _k.call(self, 7611, kp, ki, kd)
++        return _k.call(self, 7634, kp, ki, kd)
 +    def stop(self):
-+        return _k.call(self, 7612)
-+    _manual_cmd = _k.Attr(7613, '_manual_cmd')
-+    _set_cmd = _k.Attr(7614, '_set_cmd')
-+    _set_pid_cmd = _k.Attr(7615, '_set_pid_cmd')
-+    cycle_time = _k.Attr(7616, 'cycle_time')
-+    default_duty = _k.Attr(7617, 'default_duty')
-+    hall_pin = _k.Attr(7618, 'hall_pin')
-+    hall_pullup = _k.Attr(7619, 'hall_pullup')
-+    hall_resolution = _k.Attr(7620, 'hall_resolution')
-+    last_active = _k.Attr(7621, 'last_active')
-+    last_count = _k.Attr(7622, 'last_count')
-+    last_duty_cycle = _k.Attr(7623, 'last_duty_cycle')
-+    last_manual = _k.Attr(7624, 'last_manual')
-+    last_speed_mm_s = _k.Attr(7625, 'last_speed_mm_s')
-+    last_status_time = _k.Attr(7626, 'last_status_time')
-+    max_duty_step = _k.Attr(7627, 'max_duty_step')
-+    mcu = _k.Attr(7628, 'mcu')
-+    motor_fwd_pin = _k.Attr(7629, 'motor_fwd_pin')
-+    motor_rwd_pin = _k.Attr(7630, 'motor_rwd_pin')
-+    oid = _k.Attr(7631, 'oid')
-+    pid_kd = _k.Attr(7632, 'pid_kd')
-+    pid_ki = _k.Attr(7633, 'pid_ki')
-+    pid_kp = _k.Attr(7634, 'pid_kp')
-+    printer = _k.Attr(7635, 'printer')
-+    reactor = _k.Attr(7636, 'reactor')
-+    status_callback = _k.Attr(7637, 'status_callback')
-+    status_sequence = _k.Attr(7638, 'status_sequence')
++        return _k.call(self, 7635)
++    _manual_cmd = _k.Attr(7636, '_manual_cmd')
++    _set_cmd = _k.Attr(7637, '_set_cmd')
++    _set_pid_cmd = _k.Attr(7638, '_set_pid_cmd')
++    cycle_time = _k.Attr(7639, 'cycle_time')
++    default_duty = _k.Attr(7640, 'default_duty')
++    hall_pin = _k.Attr(7641, 'hall_pin')
++    hall_pullup = _k.Attr(7642, 'hall_pullup')
++    hall_resolution = _k.Attr(7643, 'hall_resolution')
++    last_active = _k.Attr(7644, 'last_active')
++    last_count = _k.Attr(7645, 'last_count')
++    last_duty_cycle = _k.Attr(7646, 'last_duty_cycle')
++    last_manual = _k.Attr(7647, 'last_manual')
++    last_speed_mm_s = _k.Attr(7648, 'last_speed_mm_s')
++    last_status_time = _k.Attr(7649, 'last_status_time')
++    max_duty_step = _k.Attr(7650, 'max_duty_step')
++    mcu = _k.Attr(7651, 'mcu')
++    motor_fwd_pin = _k.Attr(7652, 'motor_fwd_pin')
++    motor_rwd_pin = _k.Attr(7653, 'motor_rwd_pin')
++    oid = _k.Attr(7654, 'oid')
++    pid_kd = _k.Attr(7655, 'pid_kd')
++    pid_ki = _k.Attr(7656, 'pid_ki')
++    pid_kp = _k.Attr(7657, 'pid_kp')
++    printer = _k.Attr(7658, 'printer')
++    reactor = _k.Attr(7659, 'reactor')
++    status_callback = _k.Attr(7660, 'status_callback')
++    status_sequence = _k.Attr(7661, 'status_sequence')
 +
 +class Drv8833PIDAutoTune(_k.Object):
 +    __kaliru_mirror__ = True
 +    def __init__(self, lane, gcmd):
-+        _k.new(self, 7639, lane, gcmd)
++        _k.new(self, 7662, lane, gcmd)
 +    def _pause(self, duration):
-+        return _k.call(self, 7640, duration)
++        return _k.call(self, 7663, duration)
 +    def _wait_for_status(self, timeout=1.0):
-+        return _k.call(self, 7641, timeout)
++        return _k.call(self, 7664, timeout)
 +    def _measure_speed(self, duty_cycle):
-+        return _k.call(self, 7642, duty_cycle)
++        return _k.call(self, 7665, duty_cycle)
 +    def _find_baseline_duty(self):
-+        return _k.call(self, 7643)
++        return _k.call(self, 7666)
 +    def _check_peak(self, sample_time, speed, target):
-+        return _k.call(self, 7644, sample_time, speed, target)
++        return _k.call(self, 7667, sample_time, speed, target)
 +    def _collect_relay_response(self, low_duty, high_duty):
-+        return _k.call(self, 7645, low_duty, high_duty)
++        return _k.call(self, 7668, low_duty, high_duty)
 +    def _get_peak_pairs(self):
-+        return _k.call(self, 7646)
++        return _k.call(self, 7669)
 +    def _calc_pid(self, relay_duty, pairs):
-+        return _k.call(self, 7647, relay_duty, pairs)
++        return _k.call(self, 7670, relay_duty, pairs)
 +    def write_file_data(self, filename):
-+        return _k.call(self, 7648, filename)
++        return _k.call(self, 7671, filename)
 +    def run(self):
-+        return _k.call(self, 7649)
-+    band = _k.Attr(7650, 'band')
-+    controller = _k.Attr(7651, 'controller')
-+    data = _k.Attr(7652, 'data')
-+    direction = _k.Attr(7653, 'direction')
-+    eventtime = _k.Attr(7654, 'eventtime')
-+    gcmd = _k.Attr(7655, 'gcmd')
-+    lane = _k.Attr(7656, 'lane')
-+    peaks = _k.Attr(7657, 'peaks')
-+    reactor = _k.Attr(7658, 'reactor')
-+    sample_time = _k.Attr(7659, 'sample_time')
-+    settle_time = _k.Attr(7660, 'settle_time')
-+    switch_times = _k.Attr(7661, 'switch_times')
-+    target_speed = _k.Attr(7662, 'target_speed')
-+    timeout = _k.Attr(7663, 'timeout')
-+    write_file = _k.Attr(7664, 'write_file')
++        return _k.call(self, 7672)
++    band = _k.Attr(7673, 'band')
++    controller = _k.Attr(7674, 'controller')
++    data = _k.Attr(7675, 'data')
++    direction = _k.Attr(7676, 'direction')
++    eventtime = _k.Attr(7677, 'eventtime')
++    gcmd = _k.Attr(7678, 'gcmd')
++    lane = _k.Attr(7679, 'lane')
++    peaks = _k.Attr(7680, 'peaks')
++    reactor = _k.Attr(7681, 'reactor')
++    sample_time = _k.Attr(7682, 'sample_time')
++    settle_time = _k.Attr(7683, 'settle_time')
++    switch_times = _k.Attr(7684, 'switch_times')
++    target_speed = _k.Attr(7685, 'target_speed')
++    timeout = _k.Attr(7686, 'timeout')
++    write_file = _k.Attr(7687, 'write_file')
 +
 +class Drv8833CommandHelper(_k.Object):
 +    __kaliru_mirror__ = True
@@ -665,96 +694,96 @@ index 0000000..5ea9934
 +    cmd_DRV8833_PID_TUNE_help = 'Run relay autotune for DRV8833 PID gains'
 +    cmd_SET_DRV8833_PID_help = 'Update DRV8833 PID gains'
 +    def __init__(self, printer):
-+        _k.new(self, 7665, printer)
++        _k.new(self, 7688, printer)
 +    def _lookup_lane(self, gcmd):
-+        return _k.call(self, 7666, gcmd)
-+    def cmd_MOVE_DEBUG(self, gcmd):
-+        return _k.call(self, 7667, gcmd)
-+    def cmd_DRV_SET_SPEED(self, gcmd):
-+        return _k.call(self, 7668, gcmd)
-+    def cmd_DRV_MOVE(self, gcmd):
-+        return _k.call(self, 7669, gcmd)
-+    def cmd_DRV8833_PID_TUNE(self, gcmd):
-+        return _k.call(self, 7670, gcmd)
-+    def cmd_SET_DRV8833_PID(self, gcmd):
-+        return _k.call(self, 7671, gcmd)
-+    gcode = _k.Attr(7672, 'gcode')
-+    printer = _k.Attr(7673, 'printer')
-+
-+class PrinterDrv8833(Drv8833Interface):
-+    __kaliru_mirror__ = True
-+    def __init__(self, config):
-+        _k.new(self, 7674, config)
-+    def get_status(self, eventtime):
-+        return _k.call(self, 7675, eventtime)
-+    def _handle_request_restart(self, print_time):
-+        return _k.call(self, 7676, print_time)
-+    def _handle_stop(self):
-+        return _k.call(self, 7677)
-+    def _handle_hall_status(self):
-+        return _k.call(self, 7678)
-+    def _start(self, eventtime, direction, target_speed):
-+        return _k.call(self, 7679, eventtime, direction, target_speed)
-+    def _start_move(self, eventtime, direction, target_speed, stop_ticks):
-+        return _k.call(self, 7680, eventtime, direction, target_speed, stop_ticks)
-+    def _start_manual(self, eventtime, direction, duty_cycle):
-+        return _k.call(self, 7681, eventtime, direction, duty_cycle)
-+    def _stop(self, eventtime):
-+        return _k.call(self, 7682, eventtime)
-+    def _save_pid_gains(self, kp, ki, kd):
-+        return _k.call(self, 7683, kp, ki, kd)
-+    def set_pid_gains(self, kp, ki, kd, save_to_config=False):
-+        return _k.call(self, 7684, kp, ki, kd, save_to_config)
-+    def _get_debug_totals(self):
-+        return _k.call(self, 7685)
-+    def _wait_for_move_complete(self, eventtime):
-+        return _k.call(self, 7686, eventtime)
-+    def _format_debug_message(self, eventtime):
-+        return _k.call(self, 7687, eventtime)
-+    def drv8833_set_speed(self, speed):
-+        return _k.call(self, 7688, speed)
-+    def drv8833_move(self, speed, distance, wait_for_completion=True):
-+        return _k.call(self, 7689, speed, distance, wait_for_completion)
-+    cmd_MOVE_DEBUG_help = 'Run the DRV8833 lane for a fixed time while logging hall counts, hall speed, and duty cycle'
-+    cmd_DRV_SET_SPEED_help = 'Set the DRV8833 lane speed in mm/s'
-+    cmd_DRV_MOVE_help = 'Run the DRV8833 lane for a target distance in mm'
++        return _k.call(self, 7689, gcmd)
 +    def cmd_MOVE_DEBUG(self, gcmd):
 +        return _k.call(self, 7690, gcmd)
 +    def cmd_DRV_SET_SPEED(self, gcmd):
 +        return _k.call(self, 7691, gcmd)
 +    def cmd_DRV_MOVE(self, gcmd):
 +        return _k.call(self, 7692, gcmd)
-+    def cmd_SET_DRV8833_PID(self, gcmd):
-+        return _k.call(self, 7693, gcmd)
 +    def cmd_DRV8833_PID_TUNE(self, gcmd):
++        return _k.call(self, 7693, gcmd)
++    def cmd_SET_DRV8833_PID(self, gcmd):
 +        return _k.call(self, 7694, gcmd)
-+    active = _k.Attr(7695, 'active')
-+    debug_gcmd = _k.Attr(7696, 'debug_gcmd')
-+    debug_hall_start = _k.Attr(7697, 'debug_hall_start')
-+    debug_next_log_time = _k.Attr(7698, 'debug_next_log_time')
-+    direction = _k.Attr(7699, 'direction')
-+    direction_name = _k.Attr(7700, 'direction_name')
-+    gcode = _k.Attr(7701, 'gcode')
-+    hall_controller = _k.Attr(7702, 'hall_controller')
-+    manual_mode = _k.Attr(7703, 'manual_mode')
-+    mcu = _k.Attr(7704, 'mcu')
-+    name = _k.Attr(7705, 'name')
-+    printer = _k.Attr(7706, 'printer')
-+    reactor = _k.Attr(7707, 'reactor')
-+    section_name = _k.Attr(7708, 'section_name')
-+    target_speed = _k.Attr(7709, 'target_speed')
++    gcode = _k.Attr(7695, 'gcode')
++    printer = _k.Attr(7696, 'printer')
++
++class PrinterDrv8833(Drv8833Interface):
++    __kaliru_mirror__ = True
++    def __init__(self, config):
++        _k.new(self, 7697, config)
++    def get_status(self, eventtime):
++        return _k.call(self, 7698, eventtime)
++    def _handle_request_restart(self, print_time):
++        return _k.call(self, 7699, print_time)
++    def _handle_stop(self):
++        return _k.call(self, 7700)
++    def _handle_hall_status(self):
++        return _k.call(self, 7701)
++    def _start(self, eventtime, direction, target_speed):
++        return _k.call(self, 7702, eventtime, direction, target_speed)
++    def _start_move(self, eventtime, direction, target_speed, stop_ticks):
++        return _k.call(self, 7703, eventtime, direction, target_speed, stop_ticks)
++    def _start_manual(self, eventtime, direction, duty_cycle):
++        return _k.call(self, 7704, eventtime, direction, duty_cycle)
++    def _stop(self, eventtime):
++        return _k.call(self, 7705, eventtime)
++    def _save_pid_gains(self, kp, ki, kd):
++        return _k.call(self, 7706, kp, ki, kd)
++    def set_pid_gains(self, kp, ki, kd, save_to_config=False):
++        return _k.call(self, 7707, kp, ki, kd, save_to_config)
++    def _get_debug_totals(self):
++        return _k.call(self, 7708)
++    def _wait_for_move_complete(self, eventtime):
++        return _k.call(self, 7709, eventtime)
++    def _format_debug_message(self, eventtime):
++        return _k.call(self, 7710, eventtime)
++    def drv8833_set_speed(self, speed):
++        return _k.call(self, 7711, speed)
++    def drv8833_move(self, speed, distance, wait_for_completion=True):
++        return _k.call(self, 7712, speed, distance, wait_for_completion)
++    cmd_MOVE_DEBUG_help = 'Run the DRV8833 lane for a fixed time while logging hall counts, hall speed, and duty cycle'
++    cmd_DRV_SET_SPEED_help = 'Set the DRV8833 lane speed in mm/s'
++    cmd_DRV_MOVE_help = 'Run the DRV8833 lane for a target distance in mm'
++    def cmd_MOVE_DEBUG(self, gcmd):
++        return _k.call(self, 7713, gcmd)
++    def cmd_DRV_SET_SPEED(self, gcmd):
++        return _k.call(self, 7714, gcmd)
++    def cmd_DRV_MOVE(self, gcmd):
++        return _k.call(self, 7715, gcmd)
++    def cmd_SET_DRV8833_PID(self, gcmd):
++        return _k.call(self, 7716, gcmd)
++    def cmd_DRV8833_PID_TUNE(self, gcmd):
++        return _k.call(self, 7717, gcmd)
++    active = _k.Attr(7718, 'active')
++    debug_gcmd = _k.Attr(7719, 'debug_gcmd')
++    debug_hall_start = _k.Attr(7720, 'debug_hall_start')
++    debug_next_log_time = _k.Attr(7721, 'debug_next_log_time')
++    direction = _k.Attr(7722, 'direction')
++    direction_name = _k.Attr(7723, 'direction_name')
++    gcode = _k.Attr(7724, 'gcode')
++    hall_controller = _k.Attr(7725, 'hall_controller')
++    manual_mode = _k.Attr(7726, 'manual_mode')
++    mcu = _k.Attr(7727, 'mcu')
++    name = _k.Attr(7728, 'name')
++    printer = _k.Attr(7729, 'printer')
++    reactor = _k.Attr(7730, 'reactor')
++    section_name = _k.Attr(7731, 'section_name')
++    target_speed = _k.Attr(7732, 'target_speed')
 +
 +def load_config_prefix(config):
-+    return _k.fcall(7710, config)
++    return _k.fcall(7733, config)
 +
 +
 +__getattr__ = _k.module_getattr(__name__)
 diff --git a/src/plugins/mirror/klippy.extras.load_cell.hx711s.py b/src/plugins/mirror/klippy.extras.load_cell.hx711s.py
 new file mode 100644
-index 0000000..39996ff
+index 0000000..75fd966
 --- /dev/null
 +++ b/src/plugins/mirror/klippy.extras.load_cell.hx711s.py
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,65 @@
 +# kaliru plugin layer: mirror of Kalico klippy.extras.load_cell.hx711s (generated by tools/gen_mirror.py)
 +import _k
 +from .interfaces import LoadCellSensor
@@ -766,61 +795,62 @@ index 0000000..39996ff
 +class HX711SBase(LoadCellSensor):
 +    __kaliru_mirror__ = True
 +    def __init__(self, config, sensor_type, sample_rate_options, default_sample_rate, gain_options, default_gain):
-+        _k.new(self, 7711, config, sensor_type, sample_rate_options, default_sample_rate, gain_options, default_gain)
++        _k.new(self, 7734, config, sensor_type, sample_rate_options, default_sample_rate, gain_options, default_gain)
 +    def _build_config(self):
-+        return _k.call(self, 7712)
++        return _k.call(self, 7735)
 +    def get_mcu(self):
-+        return _k.call(self, 7713)
++        return _k.call(self, 7736)
 +    def get_samples_per_second(self):
-+        return _k.call(self, 7714)
++        return _k.call(self, 7737)
 +    def get_range(self):
-+        return _k.call(self, 7715)
++        return _k.call(self, 7738)
 +    def get_channel_count(self):
-+        return _k.call(self, 7716)
++        return _k.call(self, 7739)
 +    def add_client(self, callback):
-+        return _k.call(self, 7717, callback)
++        return _k.call(self, 7740, callback)
 +    def attach_load_cell_probe(self, load_cell_probe_oid):
-+        return _k.call(self, 7718, load_cell_probe_oid)
-+    def _convert_samples(self, samples):
-+        return _k.call(self, 7719, samples)
++        return _k.call(self, 7741, load_cell_probe_oid)
++    @staticmethod
++    def _convert_samples(samples):
++        return _k.fcall(7742, samples)
 +    def _start_measurements(self):
-+        return _k.call(self, 7720)
++        return _k.call(self, 7743)
 +    def _finish_measurements(self):
-+        return _k.call(self, 7721)
++        return _k.call(self, 7744)
 +    def _process_batch(self, eventtime):
-+        return _k.call(self, 7722, eventtime)
-+    attach_probe_cmd = _k.Attr(7723, 'attach_probe_cmd')
-+    batch_bulk = _k.Attr(7724, 'batch_bulk')
-+    consecutive_fails = _k.Attr(7725, 'consecutive_fails')
-+    dout_pins = _k.Attr(7726, 'dout_pins')
-+    ffreader = _k.Attr(7727, 'ffreader')
-+    gain_channel = _k.Attr(7728, 'gain_channel')
-+    last_error_count = _k.Attr(7729, 'last_error_count')
-+    mcu = _k.Attr(7730, 'mcu')
-+    name = _k.Attr(7731, 'name')
-+    oid = _k.Attr(7732, 'oid')
-+    printer = _k.Attr(7733, 'printer')
-+    query_hx711s_cmd = _k.Attr(7734, 'query_hx711s_cmd')
-+    sclk_pins = _k.Attr(7735, 'sclk_pins')
-+    sensor_count = _k.Attr(7736, 'sensor_count')
-+    sensor_type = _k.Attr(7737, 'sensor_type')
-+    sps = _k.Attr(7738, 'sps')
++        return _k.call(self, 7745, eventtime)
++    attach_probe_cmd = _k.Attr(7746, 'attach_probe_cmd')
++    batch_bulk = _k.Attr(7747, 'batch_bulk')
++    consecutive_fails = _k.Attr(7748, 'consecutive_fails')
++    dout_pins = _k.Attr(7749, 'dout_pins')
++    error_count = _k.Attr(7750, 'error_count')
++    ffreader = _k.Attr(7751, 'ffreader')
++    gain_channel = _k.Attr(7752, 'gain_channel')
++    mcu = _k.Attr(7753, 'mcu')
++    name = _k.Attr(7754, 'name')
++    oid = _k.Attr(7755, 'oid')
++    printer = _k.Attr(7756, 'printer')
++    query_hx711s_cmd = _k.Attr(7757, 'query_hx711s_cmd')
++    sclk_pins = _k.Attr(7758, 'sclk_pins')
++    sensor_count = _k.Attr(7759, 'sensor_count')
++    sensor_type = _k.Attr(7760, 'sensor_type')
++    sps = _k.Attr(7761, 'sps')
 +
 +class HX711S(HX711SBase):
 +    __kaliru_mirror__ = True
 +    def __init__(self, config):
-+        _k.new(self, 7739, config)
++        _k.new(self, 7762, config)
 +
 +class HX717S(HX711SBase):
 +    __kaliru_mirror__ = True
 +    def __init__(self, config):
-+        _k.new(self, 7740, config)
++        _k.new(self, 7763, config)
 +
 +HX711S_SENSOR_TYPES = {'hx711s': HX711S, 'hx717s': HX717S}
 +
 +__getattr__ = _k.module_getattr(__name__)
 diff --git a/src/plugins/mirror/klippy.extras.thermistor.py b/src/plugins/mirror/klippy.extras.thermistor.py
-index 18f0dbb..35b4e6c 100644
+index 18f0dbb..26ebda6 100644
 --- a/src/plugins/mirror/klippy.extras.thermistor.py
 +++ b/src/plugins/mirror/klippy.extras.thermistor.py
 @@ -5,12 +5,16 @@ KELVIN_TO_CELSIUS = -273.15
@@ -836,9 +866,9 @@ index 18f0dbb..35b4e6c 100644
      def setup_coefficients_beta(self, t1, r1, beta):
          return _k.call(self, 5061, t1, r1, beta)
 +    def _remove_pulldown(self, r):
-+        return _k.call(self, 7741, r)
++        return _k.call(self, 7764, r)
 +    def _apply_pulldown(self, r):
-+        return _k.call(self, 7742, r)
++        return _k.call(self, 7765, r)
      def calc_temp(self, adc):
          return _k.call(self, 5062, adc)
      def calc_adc(self, temp):
@@ -846,7 +876,7 @@ index 18f0dbb..35b4e6c 100644
      c2 = _k.Attr(5065, 'c2')
      c3 = _k.Attr(5066, 'c3')
      inline_resistor = _k.Attr(5067, 'inline_resistor')
-+    pulldown_resistor = _k.Attr(7743, 'pulldown_resistor')
++    pulldown_resistor = _k.Attr(7766, 'pulldown_resistor')
      pullup = _k.Attr(5068, 'pullup')
  
  def PrinterThermistor(config, params):
@@ -864,7 +894,7 @@ index 28d5e68..be025d3 100644
  
  __getattr__ = _k.module_getattr(__name__)
 diff --git a/src/plugins/mirror/klippy.queuelogger.py b/src/plugins/mirror/klippy.queuelogger.py
-index 71e7bb2..ea25f7f 100644
+index 4bcead2..3351c33 100644
 --- a/src/plugins/mirror/klippy.queuelogger.py
 +++ b/src/plugins/mirror/klippy.queuelogger.py
 @@ -22,16 +22,11 @@ class QueueHandler(logging.Handler):
@@ -901,12 +931,12 @@ index 71e7bb2..ea25f7f 100644
              self.rollover_info[name] for name in sorted(self.rollover_info)
          ]
 diff --git a/src/plugins/mirror_ids.rs b/src/plugins/mirror_ids.rs
-index 007db0d..fd04cb3 100644
+index a44d1dc..b89bbb3 100644
 --- a/src/plugins/mirror_ids.rs
 +++ b/src/plugins/mirror_ids.rs
 @@ -1,4 +1,4 @@
--// generated by tools/gen_mirror.py from Kalico 5b594279: do not edit
-+// generated by tools/gen_mirror.py from Kalico 5b594279 with patches: do not edit
+-// generated by tools/gen_mirror.py from Kalico 550d21fb: do not edit
++// generated by tools/gen_mirror.py from Kalico 550d21fb with patches: do not edit
  /// mirrored module names; true = a package
  pub static MODULES: &[(&str, bool)] = &[
      ("klippy", true),
@@ -935,7 +965,7 @@ index 007db0d..fd04cb3 100644
      ("klippy.extras.load_cell.hx71x", false),
      ("klippy.extras.load_cell.interfaces", false),
      ("klippy.extras.load_cell.load_cell", false),
-@@ -7702,4 +7706,259 @@ pub static IDS: &[&str] = &[
+@@ -7725,4 +7729,259 @@ pub static IDS: &[&str] = &[
      "klippy.webhooks.QueryStatusHelper.printer",
      "klippy.webhooks.QueryStatusHelper.query_timer",
      "klippy.webhooks.add_early_printer_objects",
@@ -1177,9 +1207,9 @@ index 007db0d..fd04cb3 100644
 +    "klippy.extras.load_cell.hx711s.HX711SBase.batch_bulk",
 +    "klippy.extras.load_cell.hx711s.HX711SBase.consecutive_fails",
 +    "klippy.extras.load_cell.hx711s.HX711SBase.dout_pins",
++    "klippy.extras.load_cell.hx711s.HX711SBase.error_count",
 +    "klippy.extras.load_cell.hx711s.HX711SBase.ffreader",
 +    "klippy.extras.load_cell.hx711s.HX711SBase.gain_channel",
-+    "klippy.extras.load_cell.hx711s.HX711SBase.last_error_count",
 +    "klippy.extras.load_cell.hx711s.HX711SBase.mcu",
 +    "klippy.extras.load_cell.hx711s.HX711SBase.name",
 +    "klippy.extras.load_cell.hx711s.HX711SBase.oid",
@@ -1196,7 +1226,7 @@ index 007db0d..fd04cb3 100644
 +    "klippy.extras.thermistor.Thermistor.pulldown_resistor",
  ];
 diff --git a/tools/gen_mirror.py b/tools/gen_mirror.py
-index 010ea13..bdccfd6 100644
+index 5352455..10f284f 100644
 --- a/tools/gen_mirror.py
 +++ b/tools/gen_mirror.py
 @@ -20,7 +20,9 @@
@@ -1229,7 +1259,7 @@ index 010ea13..bdccfd6 100644
          return len(self.names) - 1
  
  
-@@ -383,7 +390,12 @@ def main():
+@@ -386,7 +393,12 @@ def main():
      kalico, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
      rev = subprocess.run(["git", "-C", str(kalico), "rev-parse", "--short", "HEAD"],
                           capture_output=True, text=True).stdout.strip()
