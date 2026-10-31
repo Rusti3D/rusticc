@@ -22,7 +22,7 @@ Claude-Session: https://claude.ai/code/session_015j6wmNX3xANfteuEeqMb2L
 
 diff --git a/rusticc/Cargo.lock b/rusticc/Cargo.lock
 new file mode 100644
-index 0000000..7d8d857
+index 0000000..f69af1c
 --- /dev/null
 +++ b/rusticc/Cargo.lock
 @@ -0,0 +1,346 @@
@@ -194,7 +194,7 @@ index 0000000..7d8d857
 +[[package]]
 +name = "rust-afc"
 +version = "0.1.0"
-+source = "git+https://github.com/Rusti3D/Rust-AFC?rev=e85ca0b69ddafc02a43dede2e1a9980bde8f71c7#e85ca0b69ddafc02a43dede2e1a9980bde8f71c7"
++source = "git+https://github.com/Rusti3D/Rust-AFC?rev=7990208a0d617f11478825a9aa7fdf14ecce2f13#7990208a0d617f11478825a9aa7fdf14ecce2f13"
 +dependencies = [
 + "kaliru",
 + "libc",
@@ -374,7 +374,7 @@ index 0000000..7d8d857
 +checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 diff --git a/rusticc/Cargo.toml b/rusticc/Cargo.toml
 new file mode 100644
-index 0000000..83e31a0
+index 0000000..58fb43e
 --- /dev/null
 +++ b/rusticc/Cargo.toml
 @@ -0,0 +1,32 @@
@@ -393,7 +393,7 @@ index 0000000..83e31a0
 +
 +[dependencies]
 +kaliru = { path = "..", default-features = false, features = ["plugins"] }
-+rust-afc = { git = "https://github.com/Rusti3D/Rust-AFC", rev = "e85ca0b69ddafc02a43dede2e1a9980bde8f71c7" }
++rust-afc = { git = "https://github.com/Rusti3D/Rust-AFC", rev = "7990208a0d617f11478825a9aa7fdf14ecce2f13" }
 +
 +# the plugins are built against this kaliru, not the one they name
 +[patch."https://github.com/Rusti3D/kaliru"]
